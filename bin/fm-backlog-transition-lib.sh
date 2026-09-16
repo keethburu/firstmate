@@ -1182,6 +1182,12 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = local%20main ]; then
     args[1]="local main"
   fi
+  if [ "${args[0]-}" = --pr ]; then
+    case "${args[1]-}" in
+      https://github.com/*/pull/*) ;;
+      *) args[0]=--note ;;
+    esac
+  fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if ! fm_backlog_record_present "$meta" "task record" "$state"; then
