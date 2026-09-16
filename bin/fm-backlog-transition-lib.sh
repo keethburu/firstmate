@@ -570,8 +570,9 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
+  local github_pr='^https://github\.com/[^/]+/[^/]+/pull/[1-9][0-9]*$'
   case "$flag" in
-    --pr) return 0 ;;
+    --pr) [[ "$value" =~ $github_pr ]] ;;
     --report) [ "$value" = "data/$id/report.md" ] ;;
     *) return 1 ;;
   esac
@@ -604,7 +605,9 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         ;;
       --pr)
         deliverable="${deliverable:+$deliverable; }PR $arg"
-        row_args=(--pr "$arg")
+        if fm_backlog_row_artifact_supported "$id" --pr "$arg"; then
+          row_args=(--pr "$arg")
+        fi
         ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
     esac
@@ -1184,11 +1187,9 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   fi
   # Records written before teardown sent non-GitHub merge links as notes still
   # carry them under --pr, which tasks-axi rejects; replay them as notes.
-  if [ "${args[0]-}" = --pr ]; then
-    case "${args[1]-}" in
-      https://github.com/*/pull/*) ;;
-      *) args[0]=--note ;;
-    esac
+  if [ "${args[0]-}" = --pr ] \
+    && ! fm_backlog_row_artifact_supported "$id" --pr "${args[1]-}"; then
+    args[0]=--note
   fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
