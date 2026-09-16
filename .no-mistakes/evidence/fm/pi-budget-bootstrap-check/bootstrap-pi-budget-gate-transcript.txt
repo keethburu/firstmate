@@ -1,0 +1,73 @@
+== S1 gated dispatch, real host (CLI on PATH, real ~/.pi/agent/extensions/pi-budget.ts)
+$ bootstrap
+NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out.
+fatal: not a git repository (or any of the parent directories): .git
+fatal: not a git repository (or any of the parent directories): .git
+[exit 0]
+
+== S2 gated dispatch, CLI removed from PATH, PI_CODING_AGENT_DIR -> empty extensions dir
+$ PATH=<without pi-budget-axi> PI_CODING_AGENT_DIR=$TMP/agent bootstrap
+NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out.
+MISSING_MANUAL: pi-budget-axi (instructions: https://github.com/keethburu/pi-budget-axi#setup)
+MISSING_MANUAL: pi-budget-extension (instructions: https://github.com/keethburu/pi-budget-axi#setup)
+fatal: not a git repository (or any of the parent directories): .git
+fatal: not a git repository (or any of the parent directories): .git
+[exit 0]
+
+== S3 gated dispatch, CLI on PATH, dangling pi-budget.ts symlink
+$ PI_CODING_AGENT_DIR=$TMP/agent bootstrap (dangling link)
+NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out.
+MISSING_MANUAL: pi-budget-extension (instructions: https://github.com/keethburu/pi-budget-axi#setup)
+fatal: not a git repository (or any of the parent directories): .git
+fatal: not a git repository (or any of the parent directories): .git
+[exit 0]
+
+== S4 same, link target now exists
+$ PI_CODING_AGENT_DIR=$TMP/agent bootstrap (link resolves)
+NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out.
+fatal: not a git repository (or any of the parent directories): .git
+fatal: not a git repository (or any of the parent directories): .git
+[exit 0]
+
+== S5 PI_CODING_AGENT_DIR unset, HOME points at a home without ~/.pi
+$ HOME=$TMP/fakehome bootstrap
+env: ‘-u’: No such file or directory
+[exit 127]
+
+== S6 dispatch without pi-budget-axi, gate fully absent
+$ PATH=<without pi-budget-axi> PI_CODING_AGENT_DIR=$TMP/absent bootstrap
+NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out.
+fatal: not a git repository (or any of the parent directories): .git
+fatal: not a git repository (or any of the parent directories): .git
+[exit 0]
+
+== S7 no crew-dispatch.json at all, gate absent
+$ PATH=<without pi-budget-axi> PI_CODING_AGENT_DIR=$TMP/absent bootstrap
+NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out.
+fatal: not a git repository (or any of the parent directories): .git
+fatal: not a git repository (or any of the parent directories): .git
+[exit 0]
+
+== S8 malformed dispatch naming pi-budget-axi, gate absent
+$ PATH=<without pi-budget-axi> PI_CODING_AGENT_DIR=$TMP/absent bootstrap
+NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out.
+CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
+fatal: not a git repository (or any of the parent directories): .git
+fatal: not a git repository (or any of the parent directories): .git
+[exit 0]
+
+== S5 (rerun) gated dispatch, PI_CODING_AGENT_DIR unset, HOME without ~/.pi (default path $HOME/.pi/agent/extensions)
+$ env -u PI_CODING_AGENT_DIR HOME=$TMP/fakehome bootstrap
+NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out.
+NEEDS_GH_AUTH
+MISSING_MANUAL: pi-budget-extension (instructions: https://github.com/keethburu/pi-budget-axi#setup)
+fatal: not a git repository (or any of the parent directories): .git
+fatal: not a git repository (or any of the parent directories): .git
+[exit 0]
+
+== S5b same, default-path extension now present
+NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out.
+NEEDS_GH_AUTH
+fatal: not a git repository (or any of the parent directories): .git
+fatal: not a git repository (or any of the parent directories): .git
+[exit 0]
