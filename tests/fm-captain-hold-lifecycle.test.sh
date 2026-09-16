@@ -3091,6 +3091,33 @@ SH
 
 # A home whose data directory is relocated keeps one backlog; the predicate and
 # the retention must address it the way teardown does, not FM_HOME/data.
+test_legacy_gitlab_retain_record_does_not_wedge_an_answer() {
+  local home id show
+  home=$(make_home legacy-gitlab-retain-answer)
+  id=sample-legacy-gitlab-retain
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Ship the legacy GitLab retain fixture" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the legacy GitLab retain fixture"
+  write_origin_meta "$home" "$id" ship
+  printf 'done: merged\n' > "$home/state/$id.status"
+  printf '# Legacy GitLab retain\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$id" --reason "captain must choose after the GitLab merge" \
+    >/dev/null || fail "could not hold the legacy GitLab retain fixture"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the legacy GitLab retain fixture"
+  rm -f "$home/state/$id.meta"
+  printf 'id=%s\ndata=%s\nspawn_gen=fixture-%s\ncleanup_incomplete=0\nmode=retain\narg=--pr\narg=%s\n' \
+    "$id" "$home/data" "$id" "https://gitlab.com/example/repo/-/merge_requests/44" \
+    > "$home/state/$id.backlog-close"
+
+  printf 'Proceed with the merged result.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the legacy GitLab retain record wedged the captain's answer"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered GitLab row disappeared"
+  assert_contains "$show" "state: done" "the legacy GitLab record kept the answered call open"
+  pass "a legacy GitLab retain record does not wedge the captain's answer"
+}
+
 test_teardown_retains_captain_calls_in_a_relocated_backlog() {
   local home data id show
   home=$(make_home teardown-relocated-hold)
@@ -4014,6 +4041,7 @@ test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_answer_before_cleanup_replay_preserves_the_retained_report
 test_unusable_pending_close_record_names_its_reason
 test_relocated_report_does_not_wedge_an_answer_before_replay
+test_legacy_gitlab_retain_record_does_not_wedge_an_answer
 test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task

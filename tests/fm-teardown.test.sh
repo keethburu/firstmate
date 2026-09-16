@@ -705,7 +705,7 @@ test_local_only_fork_remote_allows() {
 }
 
 test_teardown_closes_the_backlog_item_itself() {
-  local case_dir out
+  local case_dir detail out
   case_dir=$(make_case tasks-axi-close)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
@@ -716,6 +716,11 @@ test_teardown_closes_the_backlog_item_itself() {
     || fail "teardown returned success while its backlog item was still open: $(backlog_row_state "$case_dir")"
   assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
     "closed backlog item did not record the task's PR"
+  detail=$(tasks-axi show task-x1 --full --file "$case_dir/data/backlog.md")
+  assert_contains "$detail" 'links: "pr:https://github.com/example/repo/pull/7"' \
+    "a GitHub pull request was not retained as the backlog item's PR link"
+  assert_contains "$detail" 'body: ""' \
+    "a GitHub pull request was unexpectedly moved into the completion note"
   assert_absent "$case_dir/state/task-x1.backlog-close" \
     "a landed close left its pending-close record behind"
   printf '%s\n' "$out" | grep -F 'bin/fm-tasks-axi.sh ready' >/dev/null \
@@ -725,6 +730,27 @@ test_teardown_closes_the_backlog_item_itself() {
   printf '%s\n' "$out" | grep -F 'Run tasks-axi done' >/dev/null \
     && fail "teardown still asked a later turn to close the item it already closed: $out"
   pass "teardown closes its own backlog item before reporting success"
+}
+
+test_teardown_records_a_gitlab_merge_request_in_the_completion_note() {
+  local case_dir detail out
+  case_dir=$(make_case tasks-axi-gitlab-note)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://gitlab.com/example/repo/-/merge_requests/42' >> \
+    "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+
+  out=$(run_teardown "$case_dir") || fail "GitLab teardown failed with a real backlog: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "GitLab teardown returned success while its backlog item was still open: $(backlog_row_state "$case_dir")"
+  detail=$(tasks-axi show task-x1 --full --file "$case_dir/data/backlog.md")
+  assert_contains "$detail" 'links: none' \
+    "a GitLab merge request was incorrectly passed as the backlog item's PR link"
+  assert_contains "$detail" 'body: "https://gitlab.com/example/repo/-/merge_requests/42"' \
+    "the GitLab merge-request URL was not retained in the completion note"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "a GitLab close left its pending-close record behind"
+  pass "teardown records a GitLab merge request in the completion note"
 }
 
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
@@ -3668,6 +3694,7 @@ EOF
 
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
+test_teardown_records_a_gitlab_merge_request_in_the_completion_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
