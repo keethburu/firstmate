@@ -2029,6 +2029,28 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
 }
 
+test_recovery_replays_a_gitlab_merge_request_as_a_completion_note() {
+  local case_dir detail id marker out
+  id=atomic-heal-gitlab-note-b9
+  case_dir=$(make_home heal-gitlab-note)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-gitlab-note\narg=--note\narg=https://gitlab.com/example/repo/-/merge_requests/42\n' \
+    "$id" "$(home_of "$case_dir")/data" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "GitLab close replay left the item at $(row_state "$case_dir" "$id"): $out"
+  detail=$(tasks-axi show "$id" --full --file "$(backlog_of "$case_dir")")
+  assert_contains "$detail" 'links: none' \
+    "GitLab close replay turned the merge request into a PR link"
+  assert_contains "$detail" 'body: "https://gitlab.com/example/repo/-/merge_requests/42"' \
+    "GitLab close replay dropped the merge-request URL from the completion note"
+  assert_absent "$marker" "a replayed GitLab close left its pending-close record behind"
+  pass "session start replays a GitLab merge request into the completion note"
+}
+
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   local case_dir id marker out
   id=atomic-heal-done-backfill-b9
@@ -3053,6 +3075,7 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_replays_a_gitlab_merge_request_as_a_completion_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning

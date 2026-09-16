@@ -902,11 +902,65 @@ fm_backlog_close_marker_path() {  # <state-dir> <id>
   printf '%s/%s.backlog-close\n' "$1" "$2"
 }
 
+fm_backlog_close_url_valid() {  # <https-url>
+  local value=${1-}
+  local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
+  local percent_tail percent_valid
+  [ "${#value}" -le 2048 ] \
+    && case "$value" in https://*) true ;; *) false ;; esac \
+    && case "$value" in
+      *[[:space:]]*|*[!A-Za-z0-9:/?\&=._#%+~@-]*) false ;;
+      *) true ;;
+    esac \
+    && {
+      url_tail=${value#https://}
+      url_authority=${url_tail%%/*}
+      url_path=${url_tail#*/}
+      url_host=$url_authority
+      url_port=
+      case "$url_authority" in
+        *:*) url_host=${url_authority%%:*}; url_port=${url_authority#*:} ;;
+      esac
+      [ "$url_path" != "$url_tail" ] \
+        && case "$url_host" in
+          ''|[-.]*|*[-.]|*..*|*[!A-Za-z0-9.-]*) false ;;
+          *[A-Za-z0-9]*) true ;;
+          *) false ;;
+        esac \
+        && {
+          host_rest=$url_host
+          host_valid=1
+          while :; do
+            host_label=${host_rest%%.*}
+            case "$host_label" in ''|-*|*-) host_valid=0; break ;; esac
+            [ "$host_rest" = "$host_label" ] && break
+            host_rest=${host_rest#*.}
+          done
+          [ "$host_valid" = 1 ]
+        } \
+        && case "$url_authority" in
+          *:*) case "$url_port" in ''|*[!0-9]*|??????*) false ;; *) true ;; esac ;;
+          *) true ;;
+        esac \
+        && case "$url_path" in *[A-Za-z0-9]*) true ;; *) false ;; esac \
+        && {
+          percent_tail=$url_path
+          percent_valid=1
+          while case "$percent_tail" in *%*) true ;; *) false ;; esac; do
+            percent_tail=${percent_tail#*%}
+            case "$percent_tail" in
+              [0-9A-Fa-f][0-9A-Fa-f]*) percent_tail=${percent_tail#??} ;;
+              *) percent_valid=0; break ;;
+            esac
+          done
+          [ "$percent_valid" = 1 ]
+        }
+    }
+}
+
 fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <expected-id> <state-dir>
   local marker=$1 authorized_data data_resolved expected_id=$3 state=$4
   local id='' data='' marker_spawn_gen='' cleanup_incomplete=0 mode=close line raw_bytes arg_value
-  local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
-  local percent_tail percent_valid
   local id_count=0 data_count=0 spawn_gen_count=0 cleanup_incomplete_count=0 mode_count=0
   local args=()
   FM_BACKLOG_CLOSE_VALIDATED_ID=
@@ -1001,60 +1055,10 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
-        --pr)
-          arg_value=${args[1]}
-          [ "${#arg_value}" -le 2048 ] \
-            && case "$arg_value" in https://*) true ;; *) false ;; esac \
-            && case "$arg_value" in
-              *[[:space:]]*|*[!A-Za-z0-9:/?\&=._#%+~@-]*) false ;;
-              *) true ;;
-            esac \
-            && {
-              url_tail=${arg_value#https://}
-              url_authority=${url_tail%%/*}
-              url_path=${url_tail#*/}
-              url_host=$url_authority
-              url_port=
-              case "$url_authority" in
-                *:*) url_host=${url_authority%%:*}; url_port=${url_authority#*:} ;;
-              esac
-              [ "$url_path" != "$url_tail" ] \
-                && case "$url_host" in
-                  ''|[-.]*|*[-.]|*..*|*[!A-Za-z0-9.-]*) false ;;
-                  *[A-Za-z0-9]*) true ;;
-                  *) false ;;
-                esac \
-                && {
-                  host_rest=$url_host
-                  host_valid=1
-                  while :; do
-                    host_label=${host_rest%%.*}
-                    case "$host_label" in ''|-*|*-) host_valid=0; break ;; esac
-                    [ "$host_rest" = "$host_label" ] && break
-                    host_rest=${host_rest#*.}
-                  done
-                  [ "$host_valid" = 1 ]
-                } \
-                && case "$url_authority" in
-                  *:*) case "$url_port" in ''|*[!0-9]*|??????*) false ;; *) true ;; esac ;;
-                  *) true ;;
-                esac \
-                && case "$url_path" in *[A-Za-z0-9]*) true ;; *) false ;; esac \
-                && {
-                  percent_tail=$url_path
-                  percent_valid=1
-                  while case "$percent_tail" in *%*) true ;; *) false ;; esac; do
-                    percent_tail=${percent_tail#*%}
-                    case "$percent_tail" in
-                      [0-9A-Fa-f][0-9A-Fa-f]*) percent_tail=${percent_tail#??} ;;
-                      *) percent_valid=0; break ;;
-                    esac
-                  done
-                  [ "$percent_valid" = 1 ]
-                }
-            }
+        --note)
+          [ "${args[1]}" = "local%20main" ] || fm_backlog_close_url_valid "${args[1]}"
           ;;
+        --pr) fm_backlog_close_url_valid "${args[1]}" ;;
         --report)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 4096 ] \
@@ -1175,7 +1179,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
-  if [ "${args[0]-}" = --note ]; then
+  if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = local%20main ]; then
     args[1]="local main"
   fi
   meta="$state/$id.meta"

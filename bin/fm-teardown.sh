@@ -1415,7 +1415,11 @@ backlog_done_args() {
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ -n "$PR_URL" ]; then
-        BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+        if fm_pr_url_parse "$PR_URL" && [ "$FM_PR_PROVIDER" = github ]; then
+          BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+        else
+          BACKLOG_DONE_ARGS=(--note "$PR_URL")
+        fi
       fi
       ;;
   esac
