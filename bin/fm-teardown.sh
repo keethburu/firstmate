@@ -1401,7 +1401,9 @@ work_is_landed() {
 
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
+# other ship carries the PR recorded on its own record. tasks-axi `--pr` accepts
+# only GitHub `/pull/<number>` links, so any other forge's merge link is recorded
+# as a note instead.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative

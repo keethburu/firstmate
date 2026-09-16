@@ -1182,6 +1182,8 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = local%20main ]; then
     args[1]="local main"
   fi
+  # Records written before teardown sent non-GitHub merge links as notes still
+  # carry them under --pr, which tasks-axi rejects; replay them as notes.
   if [ "${args[0]-}" = --pr ]; then
     case "${args[1]-}" in
       https://github.com/*/pull/*) ;;
