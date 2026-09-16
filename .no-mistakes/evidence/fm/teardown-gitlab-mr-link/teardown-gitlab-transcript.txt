@@ -1,0 +1,63 @@
+######## BASE 9f8ad95 (before the change)
+---- teardown task-x1 with meta pr=https://gitlab.com/example/repo/-/merge_requests/42
+fm-teardown.sh exit=1
+  | error: task-x1's endpoint and local copy are cleaned up, but its backlog item could not be closed atomically (error: Task pr link must be an http(s) pull request URL ending in /pull/<number>); the pending close is recorded and the next session start retries it
+backlog row (tasks-axi show task-x1 --full):
+  |   state: in_flight
+  |   links: none
+  |   body: ""
+pending-close record LEFT BEHIND:
+  | id=task-x1
+  | data=/tmp/fm-teardown-tests.tiK6Ri/gl-com/data
+  | spawn_gen=teardown-test-task-x1
+  | cleanup_incomplete=0
+  | arg=--pr
+  | arg=https://gitlab.com/example/repo/-/merge_requests/42
+---- teardown task-x1 with meta pr=https://git.example.org/group/sub/proj/-/merge_requests/9
+fm-teardown.sh exit=1
+  | error: task-x1's endpoint and local copy are cleaned up, but its backlog item could not be closed atomically (error: Task pr link must be an http(s) pull request URL ending in /pull/<number>); the pending close is recorded and the next session start retries it
+backlog row (tasks-axi show task-x1 --full):
+  |   state: in_flight
+  |   links: none
+  |   body: ""
+pending-close record LEFT BEHIND:
+  | id=task-x1
+  | data=/tmp/fm-teardown-tests.tiK6Ri/gl-self/data
+  | spawn_gen=teardown-test-task-x1
+  | cleanup_incomplete=0
+  | arg=--pr
+  | arg=https://git.example.org/group/sub/proj/-/merge_requests/9
+---- teardown task-x1 with meta pr=https://github.com/example/repo/pull/7
+fm-teardown.sh exit=0
+  | Backlog: task-x1 is closed in /tmp/fm-teardown-tests.tiK6Ri/gh/data/backlog.md. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due.
+backlog row (tasks-axi show task-x1 --full):
+  |   state: done
+  |   links: "pr:https://github.com/example/repo/pull/7"
+  |   body: ""
+pending-close record: none
+
+######## HEAD 0c37ff1 (this change)
+---- teardown task-x1 with meta pr=https://gitlab.com/example/repo/-/merge_requests/42
+fm-teardown.sh exit=0
+  | Backlog: task-x1 is closed in /tmp/fm-teardown-tests.tQ5dEa/gl-com/data/backlog.md. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due.
+backlog row (tasks-axi show task-x1 --full):
+  |   state: done
+  |   links: none
+  |   body: "https://gitlab.com/example/repo/-/merge_requests/42"
+pending-close record: none
+---- teardown task-x1 with meta pr=https://git.example.org/group/sub/proj/-/merge_requests/9
+fm-teardown.sh exit=0
+  | Backlog: task-x1 is closed in /tmp/fm-teardown-tests.tQ5dEa/gl-self/data/backlog.md. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due.
+backlog row (tasks-axi show task-x1 --full):
+  |   state: done
+  |   links: none
+  |   body: "https://git.example.org/group/sub/proj/-/merge_requests/9"
+pending-close record: none
+---- teardown task-x1 with meta pr=https://github.com/example/repo/pull/7
+fm-teardown.sh exit=0
+  | Backlog: task-x1 is closed in /tmp/fm-teardown-tests.tQ5dEa/gh/data/backlog.md. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due.
+backlog row (tasks-axi show task-x1 --full):
+  |   state: done
+  |   links: "pr:https://github.com/example/repo/pull/7"
+  |   body: ""
+pending-close record: none
