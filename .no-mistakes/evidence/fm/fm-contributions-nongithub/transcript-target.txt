@@ -1,0 +1,28 @@
+### target commit efd0120
+== poll 1 (both tasks in backlog) ==
+contributions: observation unavailable for https://github.com/o/r/pull/7
+gh calls so far: 1; gitlab in gh calls: 0
+== poll 2 (both tasks in backlog) ==
+contributions: observation unavailable for https://github.com/o/r/pull/7
+gh calls so far: 2; gitlab in gh calls: 0
+== poll 3 (both tasks in backlog) ==
+contributions: observation unavailable for https://github.com/o/r/pull/7
+gh calls so far: 3; gitlab in gh calls: 0
+== durable GitLab record ==
+{"schema":"fm-contributions.v1","task":"gitlab","records":[{"url":"https://gitlab.com/chops/questions-page/-/merge_requests/13","kind":"pr","checked_at":null,"observation":null,"verdict":null,"seen":[],"pending":[],"notified":[]}]}
+== durable GitHub record error ==
+{"url":"https://github.com/o/r/pull/7","checked_at":"2026-09-17T01:33:15Z","error":"forge observation unavailable or changed during read"}
+== pending ==
+[]
+== task cleanup: remove both backlog lines ==
+== poll 4 (after cleanup) ==
+contributions: observation unavailable for https://github.com/o/r/pull/7
+== poll 5 (after cleanup) ==
+contributions: observation unavailable for https://github.com/o/r/pull/7
+GitLab record unchanged after cleanup polls
+gitlab in gh calls: 0
+== bearings contributions (FM_BEARINGS_NOW) ==
+{"known":2,"checked":0,"unmeasured":1,"complete":false,"proven_clear":false}
+== first-sight after a fresh MR while budget=1 ==
+contributions: observation unavailable for https://github.com/o/r/pull/7
+{"url":"https://gitlab.com/o/proms-relay/-/merge_requests/2","checked_at":null,"error":null}
