@@ -608,8 +608,7 @@ test_genuine_failure_near_deadline_is_unavailable() {
   [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
     || fail "a genuine forge failure past the deadline was swallowed: $out"
   jq -e --arg now "$NOW" '.records[0].checked_at == $now
-    and .records[0].error == "forge observation unavailable or changed during read"
-    and .records[0].unmeasured == null' \
+    and .records[0].error == "forge observation unavailable or changed during read"' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a genuine forge failure left no error evidence'
   pass 'a genuine forge failure inside the budget still records the error and wakes'
 }
@@ -620,15 +619,6 @@ test_unsupported_forge_is_recorded_once_without_budget() {
   url=https://gitlab.com/o/r/-/merge_requests/13
   printf -- '- [ ] gitlab - Filed %s (repo: sample) (kind: ship)\n' "$url" \
     >> "$home/data/backlog.md"
-  mkdir -p "$home/data/gitlab"
-  jq -n --arg url "$url" --arg head "$HEAD_A" --arg at "$NOW" '
-    {schema:"fm-contributions.v1",task:"gitlab",records:[{
-      url:$url,kind:"pr",checked_at:$at,
-      error:"forge observation unavailable or changed during read",observation:null,
-      verdict:{head:$head,source:($url + "#note_1"),actor:"maintainer",
-        summary:"prior verdict"},
-      seen:["seen"],pending:[{token:"pending"}],notified:["pending"]}]}' \
-    > "$home/data/gitlab/contributions.json"
   cat > "$home/fakebin/gh" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FORGE_CALLS"
@@ -639,29 +629,29 @@ SH
     "$ROOT/bin/fm-contributions.sh" poll) || fail 'first unsupported-forge poll failed'
   [ -z "$out" ] || fail "an unsupported forge printed a wake line: $out"
   [ ! -e "$home/forge-calls" ] || fail 'an unsupported forge consumed forge budget'
-  jq -e '.records[0] | .url == "https://gitlab.com/o/r/-/merge_requests/13"
-    and .unmeasured == "unsupported-forge" and .error == null
-    and .seen == ["seen"] and .pending == [{token:"pending"}]
-    and .notified == ["pending"] and .verdict.summary == "prior verdict"' \
+  jq -e --arg url "$url" '.task == "gitlab" and (.records | length) == 1
+    and (.records[0] | .url == $url and .kind == "pr" and .checked_at == null
+      and .error == null and .pending == [] and .notified == [])' \
     "$home/data/gitlab/contributions.json" >/dev/null \
-    || fail 'unsupported marker changed existing contribution state'
+    || fail 'first unsupported-forge poll did not write a durable record'
   pending=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending) \
     || fail 'unsupported-forge pending projection failed'
-  printf '%s' "$pending" | jq -e 'any(.[]; . == {
-    task:"gitlab",url:"https://gitlab.com/o/r/-/merge_requests/13",
-    type:"unmeasured",reason:"unsupported-forge"})' >/dev/null \
-    || fail "pending output hid unsupported coverage: $pending"
+  [ "$pending" = '[]' ] || fail "pending listed a non-ackable entry: $pending"
   bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
     and .contributions.unmeasured == 1 and .contributions.complete == false' >/dev/null \
     || fail 'snapshot projection hid the durable unsupported contribution'
-  cp "$home/data/gitlab/contributions.json" "$home/prior.json"
+  jq --arg head "$HEAD_A" --arg url "$url" '.records[0] += {
+      error:"forge observation unavailable or changed during read",
+      verdict:{head:$head,source:($url + "#note_1"),actor:"maintainer",summary:"prior verdict"},
+      seen:["seen"]}' "$home/data/gitlab/contributions.json" > "$home/prior.json"
+  cp "$home/prior.json" "$home/data/gitlab/contributions.json"
   out=$(FORGE_CALLS="$home/forge-calls" with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 \
     "$ROOT/bin/fm-contributions.sh" poll) || fail 'second unsupported-forge poll failed'
   [ -z "$out" ] || fail "a known unsupported forge was re-reported: $out"
   [ ! -e "$home/forge-calls" ] || fail 'a known unsupported forge consumed forge budget'
   cmp -s "$home/prior.json" "$home/data/gitlab/contributions.json" \
     || fail 'a known unsupported-forge record was rewritten on the next poll'
-  pass 'unsupported forge is durably unmeasured, visible, silent, and budget-free'
+  pass 'unsupported forge is recorded once, visible, silent, and budget-free'
 }
 
 test_shared_url_observed_once() {
@@ -685,8 +675,7 @@ test_shared_url_observed_once() {
     fi
     for task in delivery duplicate; do
       jq -e --arg now "$NOW" --argjson error "$expected" \
-        '.records[0].checked_at == $now and .records[0].error == $error
-          and .records[0].unmeasured == null' \
+        '.records[0].checked_at == $now and .records[0].error == $error' \
         "$home/data/$task/contributions.json" >/dev/null || fail "owner $task did not receive the shared result ($mode)"
     done
   done
