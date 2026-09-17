@@ -138,6 +138,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-execution-lib.sh
+. "$SCRIPT_DIR/fm-execution-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -774,6 +776,10 @@ safe_checkpoint() {
 # so the note stays parent-side audit evidence.
 record_note() {
   local stamp
+  if [ -n "${EXECUTION_TICKET:-}" ]; then
+    printf '%s\n' "$NOTE" > "$NOTE_FILE"
+    return 0
+  fi
   [ -n "$NOTE" ] || return 0
   stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   printf '%s\n' "$NOTE" > "$NOTE_FILE"
@@ -805,6 +811,17 @@ do_relaunch() {
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
+  fm_execution_validate "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/crew-execution.json" || exit 1
+  EXECUTION_TICKET=
+  execution_enrolled=0
+  if fm_execution_record "$ID" >/dev/null; then
+    execution_enrolled=1
+    NOTE='See the recorded objective execution evidence.'
+    NOTE_SET=1
+  else
+    execution_rc=$?
+    [ "$execution_rc" = 2 ] || exit 1
+  fi
 
   case "$KIND" in
     ship|scout)
@@ -830,6 +847,10 @@ do_relaunch() {
     note_line="note=none"
   fi
   safe_checkpoint
+  if [ "$execution_enrolled" = 1 ]; then
+    EXECUTION_TICKET=$(FM_EXECUTION_CONTROL_PARENT=1 fm_execution_cli _prepare "$ID" "$ID" \
+      "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT") || exit 1
+  fi
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
   journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
@@ -848,7 +869,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" FM_EXECUTION_TICKET="$EXECUTION_TICKET" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
   else

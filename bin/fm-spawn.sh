@@ -29,6 +29,9 @@
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#   Bounded execution enrollment and classified continuation are owned by
+#   fm-execution.sh --help; --bounded enrolls explicitly and --restart-from <id>
+#   creates the clean successor of a structurally failed enrolled task.
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -386,6 +389,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-execution-lib.sh
+. "$SCRIPT_DIR/fm-execution-lib.sh"
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved raw_bytes
@@ -523,6 +528,8 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+EXECUTION_BOUNDED=0
+EXECUTION_RESTART=
 POS=()
 want_value=
 for a in "$@"; do
@@ -542,6 +549,7 @@ for a in "$@"; do
       MODEL=$a
       MODEL_SET=1
       ;;
+    restart_from) EXECUTION_RESTART=$a ;;
     effort)
       EFFORT=$a
       EFFORT_SET=1
@@ -580,6 +588,8 @@ for a in "$@"; do
     KIND_SET=1
     ;;
   --relaunch) RELAUNCH=1 ;;
+  --bounded) EXECUTION_BOUNDED=1 ;;
+  --restart-from) want_value=restart_from ;;
   --harness) want_value=harness ;;
   --harness=*)
     HARNESS_ARG=${a#--harness=}
@@ -1276,6 +1286,16 @@ spawn_herdr_presentation_order_lock_release() {
 # one (task ids are bare slugs), so they fall straight through to the logic below.
 idpart=${POS[0]:-}
 idpart=${idpart%%=*}
+if [ "$EXECUTION_BOUNDED" = 1 ] || [ -n "$EXECUTION_RESTART" ]; then
+  [ "$KIND" = ship ] && [ "${POS[0]:-}" = "$idpart" ] || {
+    echo 'error: bounded execution flags require a single ship task' >&2
+    exit 1
+  }
+fi
+if [ -n "$EXECUTION_RESTART" ] && [ "$RELAUNCH" = 1 ]; then
+  echo 'error: --restart-from creates a new task; it cannot accompany --relaunch' >&2
+  exit 1
+fi
 if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ]; then
   echo "error: --relaunch is single-task only; relaunch each task explicitly" >&2
   exit 1
@@ -2548,12 +2568,20 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
+  fm_execution_spawn_prepare || exit 1
   BRIEF="$DATA/$ID/launch-brief.md"
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
   {
     fm_brief_worker_role "$STATE" "$ID" &&
       printf '\n' &&
-      cat "$SOURCE_BRIEF" &&
+      if [ "$EXECUTION_ACTIVE" = 1 ]; then
+        fm_execution_cli _handoff "$ID"
+      else
+        cat "$SOURCE_BRIEF"
+      fi &&
+      if [ "$KIND" = ship ]; then
+        fm_execution_instructions "$CONFIG/crew-execution.json" "$HARNESS"
+      fi &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi
@@ -2779,6 +2807,10 @@ freshen_spawn_worktree_base() { # <worktree>
       echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
     fi
     return 1
+  fi
+  if [ -n "${EXECUTION_BASE:-}" ]; then
+    git -C "$worktree" checkout --detach "$EXECUTION_BASE" >/dev/null || return 1
+    return 0
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
     return 0
@@ -3547,6 +3579,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+  if [ "${EXECUTION_ACTIVE:-0}" = 1 ]; then
+    fm_execution_cli _base "$ID" "$WT" || exit 1
+  fi
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
@@ -4504,6 +4539,9 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
+if [ "${EXECUTION_ACTIVE:-0}" = 1 ]; then
+  fm_execution_cli _publish "$ID" "$SPAWN_GEN" || exit 1
+fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

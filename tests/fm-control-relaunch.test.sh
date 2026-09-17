@@ -1681,6 +1681,55 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_bounded_repair_preserves_work_and_fresh_evidence() {
+  local dir out rc
+  dir=$(new_case bounded bounded)
+  add_ship_task "$dir" bounded claude
+  mkdir -p "$dir/home/config"
+  jq -n '{version:1,harness_instructions:{claude:"BOUNDED INJECTION"},bounded:{
+    initial:[{harness:"claude",model:"initial",effort:"high"}],
+    repair:{harness:"claude",model:"repair",effort:"high"}}}' \
+    >"$dir/home/config/crew-execution.json"
+  sed 's/mode=no-mistakes/mode=local-only/' "$dir/home/state/bounded.meta" \
+    >"$dir/meta"
+  cp "$dir/meta" "$dir/home/state/bounded.meta"
+  out=$(run_control "$dir" bounded relaunch --harness claude --model initial \
+    --effort high --note 'Legacy task remains outside bounded enrollment.')
+  rc=$?
+  expect_code 0 "$rc" "activation must preserve legacy relaunch"$'\n'"$out"
+  [ ! -e "$dir/home/data/bounded/execution-root" ] || fail 'legacy task was enrolled'
+  printf 'spawn_gen=initial-generation\n' >>"$dir/home/state/bounded.meta"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-execution.sh" _enroll \
+    bounded "$dir/proj" claude initial high || fail 'enrollment failed'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-execution.sh" _consume \
+    bounded '' claude initial high || fail 'initial consume failed'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-execution.sh" _base bounded "$dir/wt"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-execution.sh" _publish bounded initial-generation
+  printf 'uncommitted work\n' >"$dir/wt/preserved.txt"
+  printf '\n## Progress note\nOLD WORKER THEORY\n' >>"$dir/home/data/bounded/brief.md"
+  printf 'Focused test reports expected 2, actual 1.\n' >"$dir/evidence"
+  out=$(run_control "$dir" bounded relaunch --harness claude --model repair --effort high)
+  rc=$?
+  expect_code 1 "$rc" "unclassified repair must refuse"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail 'refusal stopped worker'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-execution.sh" classify bounded salvageable \
+    --evidence-file "$dir/evidence" || fail 'classification failed'
+  out=$(run_control "$dir" bounded relaunch --harness claude --model repair --effort high)
+  rc=$?
+  expect_code 0 "$rc" "classified native repair must succeed"$'\n'"$out"
+  assert_grep 'BOUNDED INJECTION' "$dir/home/data/bounded/launch-brief.md"
+  assert_grep 'Focused test reports expected 2' "$dir/home/data/bounded/launch-brief.md"
+  if grep -q 'OLD WORKER THEORY' "$dir/home/data/bounded/launch-brief.md"; then
+    fail 'repair inherited previous reasoning'
+  fi
+  [ "$(cat "$dir/wt/preserved.txt")" = 'uncommitted work' ] || fail 'work was lost'
+  [ "$(meta_field "$dir" bounded worktree)" = "$dir/wt" ] || fail 'worktree changed'
+  jq -e '.attempt == 2 and .phase == "running"' \
+    "$dir/home/data/bounded/execution.json" >/dev/null || fail 'repair not accounted'
+  echo 'ok - bounded native repair refuses before stop and preserves fresh handoff/work'
+}
+
+test_bounded_repair_preserves_work_and_fresh_evidence
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven

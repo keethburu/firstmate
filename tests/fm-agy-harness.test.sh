@@ -617,6 +617,9 @@ test_agy_launch_carries_the_brief_with_model_effort_and_autonomy() {
   id="agy-launch-z1-$$"
   rec=$(make_agy_spawn_case launch "$id")
   read_agy_spawn_record "$rec"
+  mkdir -p "$HOME_DIR/config"
+  jq -n '{version:1,harness_instructions:{agy:"Use targeted exploration and validation."}}' \
+    >"$HOME_DIR/config/crew-execution.json"
   out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model gemini-3.8-flash-low --effort low)
   rc=$?
@@ -635,6 +638,8 @@ test_agy_launch_carries_the_brief_with_model_effort_and_autonomy() {
   assert_grep 'harness=agy' "$meta" "agy meta did not record its harness"
   assert_grep 'model=gemini-3.8-flash-low' "$meta" "agy meta did not record its model"
   assert_grep 'effort=low' "$meta" "agy meta did not record its effort"
+  assert_grep 'Use targeted exploration and validation' "$HOME_DIR/data/$id/launch-brief.md" \
+    'agy launch omitted configured implementation instructions'
   pass "fm-spawn: agy launch carries brief, model, effort, and autonomy with cleared markers"
 }
 
