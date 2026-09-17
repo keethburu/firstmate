@@ -51,13 +51,13 @@
 # record observation.checks, .can_merge and .review_decision repeat that
 # record's own last pre-merge observation of them, or, when it never observed
 # the work before the merge, carry the schema defaults [], false and "".
-# Neither form is a reading of the merged forge
-# state, and merged work claims no check coverage and no merge authority. Those
-# lanes are history, not a current reading, so projection reports no missing,
-# pending or failed lane on merged work while still counting them on open and
-# closed work. A merge also retires observation.absent_checks: that lane diff
-# needs a check read the merged branch no longer makes, so it cannot outlive
-# the merge.
+# Neither form is a reading of the merged forge state, and merged work claims
+# no check coverage and no merge authority. Those lanes are history, not a
+# current reading, so projection reports no current lane on merged work at all:
+# no lane count, and no missing, pending or failed lane, while open and closed
+# work still reports every one of them. A merge also retires
+# observation.absent_checks: that lane diff needs a check read the merged
+# branch no longer makes, so it cannot outlive the merge.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.

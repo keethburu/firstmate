@@ -781,6 +781,13 @@ test_merged_lane_history_is_not_a_current_gap() {
   bearings "$home" | jq -e '.contributions.missing_verdicts == 1
     and .contributions.counts == {captain:0,fleet:1,maintainer:0,nobody:0}' >/dev/null \
     || fail 'an open delivery stopped counting its own lane gaps'
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
+    || fail 'could not collect contribution input before the merge'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all) \
+    || fail 'could not project the open delivery'
+  printf '%s' "$out" | jq -e '.rows[0] | .distinct_checks == 3 and .missing_verdicts == 1
+    and .pending_checks == 1 and .failed_checks == 1' >/dev/null \
+    || fail "an open delivery stopped reporting its current lanes: $out"
   mutate_record "$home" delivery '.records[0].observation.state="closed"'
   bearings "$home" | jq -e '.contributions.missing_verdicts == 1' >/dev/null \
     || fail 'a closed, unmerged contribution stopped counting its lane gaps'
@@ -800,10 +807,10 @@ test_merged_lane_history_is_not_a_current_gap() {
     || fail 'could not collect contribution input after the merge'
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all) \
     || fail 'could not project the merged delivery'
-  printf '%s' "$out" | jq -e '.rows[0] | .distinct_checks == 3 and .missing_verdicts == 0
+  printf '%s' "$out" | jq -e '.rows[0] | .distinct_checks == 0 and .missing_verdicts == 0
     and .pending_checks == 0 and .failed_checks == 0 and .actor == "nobody"' >/dev/null \
     || fail "merged lane history became a current lane count: $out"
-  pass 'merged lane history is kept but never counted as a current lane gap'
+  pass 'merged lane history is kept but never counted as a current lane'
 }
 
 test_merged_pr_skips_unneeded_checks_and_captures_comments() {

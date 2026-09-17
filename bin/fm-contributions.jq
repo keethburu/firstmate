@@ -51,10 +51,11 @@ def projected($input; $saved; $now; $max_age):
        and (if $record.kind == "pr" then $observed_head != null
             else $record.error == null and $record.observation != null end)
        and ($k.url | startswith("https://github.com/"))) as $fresh
-    | (($o.checks // []) | latest_checks) as $checks
     # A merged record's lanes are its pre-merge history; no read can resolve
-    # them, so they are not a current gap. Closed work is still re-observed.
-    | (if $o.state == "merged" then [] else $checks end) as $current
+    # them, so the row reports no current lane at all. Closed work is still
+    # re-observed and keeps reporting its lanes.
+    | (if $o.state == "merged" then []
+       else (($o.checks // []) | latest_checks) end) as $current
     | [$current[] | select(.status == "completed" and (.conclusion == null or .conclusion == ""))] as $no_verdict
     | [$current[] | select(.status != "completed")] as $pending
     | [$current[] | select(.status == "completed" and .conclusion != null
@@ -82,7 +83,7 @@ def projected($input; $saved; $now; $max_age):
        elif ($failed | length) > 0 then {actor:"fleet",reason:"checks failed"}
        elif ($no_verdict | length) > 0 or (($o.absent_checks // []) | length) > 0 then
          {actor:"fleet",reason:"check lane has no verdict"}
-       elif ($checks | length) == 0 then {actor:"fleet",reason:"no reported checks; readiness unconfirmed"}
+       elif ($current | length) == 0 then {actor:"fleet",reason:"no reported checks; readiness unconfirmed"}
        elif ($pending | length) > 0 then {actor:"fleet",reason:"checks still running"}
        elif $o.review_decision == "CHANGES_REQUESTED" then {actor:"fleet",reason:"forge requests changes"}
        elif $verdict != null and $verdict.actor == "fleet" then {actor:"fleet",reason:$verdict.summary}
@@ -95,7 +96,7 @@ def projected($input; $saved; $now; $max_age):
        else {actor:"maintainer",reason:"delivery awaits the maintainer"} end) as $action
     | $k + {kind:($record.kind // (if ($k.url | contains("/issues/")) then "issue" else "pr" end)),
          checked_at:$record.checked_at,checked:$fresh,head:($observed_head // $recorded_head // $o.head),verdict:$verdict,reviews:$reviews,
-         distinct_checks:($checks | length),missing_verdicts:(($no_verdict | length) + (($o.absent_checks // []) | length)),
+         distinct_checks:($current | length),missing_verdicts:(($no_verdict | length) + (($o.absent_checks // []) | length)),
          pending_checks:($pending | length),failed_checks:($failed | length),
          stale_verdicts:((if $stale then 1 else 0 end) + ([$reviews[] | select(.freshness == "STALE")] | length)),
          signals:($record.pending // [])} + $action]
