@@ -73,13 +73,7 @@ test_custody() {
   seed_attempt
   sed 's/mode=local-only/mode=no-mistakes/' "$TASK_HOME/state/initial.meta" >"$CASE_DIR/meta"
   cp "$CASE_DIR/meta" "$TASK_HOME/state/initial.meta"
-  cat >"$FAKEBIN/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-cat "$FM_NM_OUTPUT"
-SH
-  chmod +x "$FAKEBIN/no-mistakes"
-  export FM_NM_OUTPUT="$CASE_DIR/nm-output"
+  fake_no_mistakes
   branch=$(git -C "$WORKTREE" symbolic-ref --short HEAD)
   execution classify initial salvageable --evidence-file "$CASE_DIR/evidence"
   printf 'unknown response\n' >"$FM_NM_OUTPUT"
@@ -99,6 +93,62 @@ SH
   execution _consume initial "$ticket" codex test-repair high
   unset FM_NM_OUTPUT
   echo 'ok - unknown and active custody fail closed, including after reservation'
+}
+
+fake_no_mistakes() {
+  cat >"$FAKEBIN/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat "$FM_NM_OUTPUT"
+SH
+  chmod +x "$FAKEBIN/no-mistakes"
+  export FM_NM_OUTPUT="$CASE_DIR/nm-output"
+}
+
+test_prebranch_capacity_recovery() {
+  local ticket
+  setup prebranch
+  printf '\n# Setup\nORIGINAL SCAFFOLD SETUP\n' >>"$TASK_HOME/data/initial/brief.md"
+  seed_attempt
+  sed 's/mode=local-only/mode=no-mistakes/' "$TASK_HOME/state/initial.meta" >"$CASE_DIR/meta"
+  cp "$CASE_DIR/meta" "$TASK_HOME/state/initial.meta"
+  fake_no_mistakes
+  printf 'uncommitted work\n' >"$WORKTREE/preserved.txt"
+  git -C "$WORKTREE" checkout --detach --quiet
+  execution classify initial capacity --evidence-file "$CASE_DIR/evidence" --retry-after 0
+  printf 'runs_on_current_branch: 0\n' >"$FM_NM_OUTPUT"
+  git -C "$WORKTREE" branch fm/initial HEAD
+  if execution _prepare initial initial codex test-initial max; then
+    fail 'detached checkout with an existing task branch was accepted'
+  fi
+  git -C "$WORKTREE" branch -D fm/initial >/dev/null
+  printf 'unknown response\n' >"$FM_NM_OUTPUT"
+  if execution _prepare initial initial codex test-initial max; then
+    fail 'unproven pre-branch custody was accepted'
+  fi
+  printf 'runs_on_current_branch: 0\n' >"$FM_NM_OUTPUT"
+  ticket=$(execution _prepare initial initial codex test-initial max)
+  execution _consume initial "$ticket" codex test-initial max
+  execution _handoff initial >"$CASE_DIR/handoff"
+  unset FM_NM_OUTPUT
+  assert_no_grep 'ORIGINAL SCAFFOLD SETUP' "$CASE_DIR/handoff" \
+    'continuation must replace the scaffold setup'
+  assert_grep 'git checkout -b fm/initial' "$CASE_DIR/handoff" \
+    'pre-branch continuation must let the worker create its delivery branch'
+  assert_no_grep 'Do not create a new branch' "$CASE_DIR/handoff" \
+    'pre-branch continuation must not forbid the branch it still needs'
+  [ "$(cat "$WORKTREE/preserved.txt")" = 'uncommitted work' ] || fail 'preserved work was lost'
+  echo 'ok - pre-branch recovery proves custody, refuses ambiguity and asks for the branch'
+}
+
+test_handoff_requires_original_requirements() {
+  setup original-task
+  seed_attempt
+  printf '# Task\n\n\n# Rules\nUnchanged.\n' >"$TASK_HOME/data/initial/execution-original.md"
+  if execution _handoff initial; then fail 'blank original requirements were handed off'; fi
+  rm -f "$TASK_HOME/data/initial/execution-original.md"
+  if execution _handoff initial; then fail 'missing original snapshot was handed off'; fi
+  echo 'ok - blank or missing original requirements refuse before handoff'
 }
 
 test_native_structural_restart() {
@@ -231,5 +281,7 @@ test_config_validation
 test_native_enrollment
 test_capacity_and_concurrency
 test_custody
+test_prebranch_capacity_recovery
+test_handoff_requires_original_requirements
 test_native_structural_restart
 test_immutable_policy_and_safe_snapshots

@@ -260,17 +260,33 @@ fm_execution_stopped() {
     *) fm_execution_error "source task $id is not positively stopped ($verdict)" ;; esac
 }
 
+fm_execution_worktree() {
+  local wt
+  wt=$(fm_meta_get "$STATE/$1.meta" worktree)
+  [ -n "$wt" ] && [ -d "$wt" ] ||
+    { fm_execution_error "task $1 has no usable worktree; inspect its metadata"; return 1; }
+  printf '%s\n' "$wt"
+}
+
 fm_execution_repair_setup() {
-  local id=$1 worktree branch dirty
-  worktree=$(fm_meta_get "$STATE/$id.meta" worktree)
-  branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD) ||
+  local id=$1 worktree branch posture dirty
+  worktree=$(fm_execution_worktree "$id") || return 1
+  if branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD); then
+    posture='Do not create a new branch or assume the checkout is clean.'
+  else
     branch=$(git -C "$worktree" rev-parse --verify HEAD) ||
-    { fm_execution_error "cannot inspect branch in preserved worktree $worktree"; return 1; }
+      { fm_execution_error "cannot inspect branch in preserved worktree $worktree"; return 1; }
+    if git -C "$worktree" rev-parse --verify --quiet "refs/heads/fm/$id" >/dev/null; then
+      posture="Branch fm/$id already exists while this checkout is detached; reconcile both and discard neither."
+    else
+      posture="The previous attempt ended before creating its branch. First action: \`git checkout -b fm/$id\`."
+    fi
+  fi
   dirty=$(git -C "$worktree" status --porcelain) ||
     { fm_execution_error "cannot inspect preserved changes in $worktree"; return 1; }
   printf '%s\n' "Continue in the existing task worktree: $worktree" \
     "Current branch or detached commit: $branch" \
-    'Do not create a new branch or assume the checkout is clean.' \
+    "$posture" \
     'Preserve inherited commits and uncommitted work until independently assessed.' \
     'Verify pwd -P and git rev-parse --show-toplevel both identify this task worktree.' \
     'If they identify another checkout or the primary checkout, stop and report the mismatch.'
@@ -282,12 +298,17 @@ fm_execution_repair_setup() {
 }
 
 fm_execution_handoff_document() {
-  local id=$1 record=$2 root task
+  local id=$1 record=$2 root snapshot task
   root=${record%/*}
+  snapshot="$root/execution-original.md"
+  [ -f "$snapshot" ] && [ ! -L "$snapshot" ] ||
+    { fm_execution_error "missing or unsafe original brief snapshot $snapshot"; return 1; }
+  task=$(fm_brief_heading_body "$snapshot" '# Task') || return 1
+  printf '%s' "$task" | grep -q '[^[:space:]]' ||
+    { fm_execution_error "original brief snapshot $snapshot carries no Task requirements"; return 1; }
   if [ "$(jq -r '.root' "$record")" = "$id" ]; then
-    cat "$root/execution-original.md"
+    cat "$snapshot"
   else
-    task=$(fm_brief_heading_body "$root/execution-original.md" '# Task') || return 1
     fm_brief_heading_replace "$DATA/$id/brief.md" '# Task' "$task" ||
       { fm_execution_error "cannot replace Task section in successor brief for $id"; return 1; }
   fi
@@ -333,14 +354,20 @@ fm_execution_field() {
   fm_nm_strip_quotes "$value"
 }
 
-fm_execution_custody_no_run() {
-  local output=$1 branch=$2 current count
-  current=$(fm_execution_field "$output" current_branch) || current=
+fm_execution_custody_unbound() {
+  local output=$1 count
   count=$(fm_execution_field "$output" runs_on_current_branch) || count=
-  [ "$current" = "$branch" ] && [ "$count" = 0 ] || return 2
+  [ "$count" = 0 ] || return 2
   if printf '%s\n' "$output" | grep -Eq '^(run|error|branch_sync):'; then
     fm_execution_error "contradictory no-mistakes no-run response"; return 1
   fi
+}
+
+fm_execution_custody_no_run() {
+  local output=$1 branch=$2 current
+  current=$(fm_execution_field "$output" current_branch) || current=
+  [ "$current" = "$branch" ] || return 2
+  fm_execution_custody_unbound "$output"
 }
 
 fm_execution_custody_binding() {
@@ -386,6 +413,25 @@ fm_execution_custody_terminal() {
   esac
 }
 
+# A worker that died before `git checkout -b fm/<id>` left no branch for
+# no-mistakes to own. That is provable from the absent task branch plus a
+# native report of no run at all; every other detached posture refuses.
+fm_execution_custody_prebranch() {
+  local id=$1 wt=$2 output
+  if git -C "$wt" rev-parse --verify --quiet "refs/heads/fm/$id" >/dev/null; then
+    fm_execution_error "task branch fm/$id exists while HEAD is detached; custody is ambiguous"
+    return 1
+  fi
+  output=$(fm_nm_run_bounded "$wt" 10 axi status) ||
+    { fm_execution_error "no-mistakes custody unavailable; leave work unchanged"; return 1; }
+  if fm_execution_custody_unbound "$output"; then return 0
+  else
+    [ "$?" != 2 ] ||
+      fm_execution_error "no-mistakes does not report an unused checkout; cannot prove custody"
+    return 1
+  fi
+}
+
 fm_execution_custody() {
   local id=$1 wt branch output
   case "$(fm_meta_get "$STATE/$id.meta" mode)" in
@@ -393,9 +439,9 @@ fm_execution_custody() {
     local-only|direct-PR) return 0 ;;
     *) fm_execution_error "missing or invalid delivery mode; cannot establish custody"; return 1 ;;
   esac
-  wt=$(fm_meta_get "$STATE/$id.meta" worktree)
+  wt=$(fm_execution_worktree "$id") || return 1
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD) ||
-    { fm_execution_error "cannot prove custody of a detached branch"; return 1; }
+    { fm_execution_custody_prebranch "$id" "$wt"; return; }
   output=$(fm_nm_run_bounded "$wt" 10 axi status) ||
     { fm_execution_error "no-mistakes custody unavailable; leave work unchanged"; return 1; }
   if fm_execution_custody_no_run "$output" "$branch"; then return 0
