@@ -600,26 +600,31 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
 test_budget_refusal_between_calls() { test_budget_exhaustion_keeps_prior_record exhaust; }
 test_budget_bounded_call_timeout() { test_budget_exhaustion_keeps_prior_record hang; }
 
-test_default_budget_bounded_call_timeout() {
+test_per_call_timeout_records_and_rotates() {
   local home out
-  home=$(new_home default-budget-timeout)
+  home=$(new_home per-call-timeout)
   forge_home "$home"
   wrap_forge "$home"
+  printf -- '- [ ] filed - Filed https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
   mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
-  cp "$home/data/delivery/contributions.json" "$home/prior.json"
   printf 'timeout\n' > "$home/forge/fault"
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
-    || fail 'poll failed on default-budget timeout'
-  [ -z "$out" ] || fail "default-budget timeout printed a wake line: $out"
-  grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
-    || fail 'default-budget timeout observation never started'
-  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
-    || fail "default-budget timeout rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
-  [ ! -s "$home/state/.wake-queue" ] || fail 'default-budget timeout enqueued a wake'
-  pass 'a read timeout under default budget exhausts budget, preserves the record, and stays silent'
+    || fail 'poll failed on a per-call read timeout'
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
+    || fail "a per-call read timeout was swallowed: $out"
+  jq -e --arg now "$NOW" '.records[0].checked_at == $now
+    and .records[0].error == "forge observation unavailable or changed during read"' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a repeatedly slow URL kept its old checked_at and stays first next poll'
+  grep -Fx 'api repos/o/r/issues/9' "$home/forge/calls" >/dev/null \
+    || fail 'a per-call read timeout ended the poll before the next owned URL'
+  bearings "$home" | jq -e '.contributions.known == 2 and .contributions.checked == 1
+    and .contributions.counts == {captain:0,fleet:1,maintainer:1,nobody:0}' >/dev/null \
+    || fail 'a slow URL left the rest of the corpus unmeasured'
+  pass 'a per-call read timeout records the attempt, rotates, and keeps observing the corpus'
 }
 
-test_terminal_merged_failure_stays_silent_and_keeps_record() {
+test_terminal_merged_failure_stays_silent_and_keeps_observation() {
   local home out
   home=$(new_home terminal-merged-fail)
   forge_home "$home"
@@ -631,18 +636,42 @@ test_terminal_merged_failure_stays_silent_and_keeps_record() {
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed on terminal merged forge failure'
   [ -z "$out" ] || fail "terminal merged failure printed a wake line: $out"
-  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
-    || fail "terminal merged failure rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
+  jq -e --arg now "$NOW" --slurpfile prior "$home/prior.json" '
+    .records[0].observation == $prior[0].records[0].observation
+    and .records[0].error == null and .records[0].checked_at == $now' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "terminal merged failure lost the merged observation or pinned the queue: $(cat "$home/data/delivery/contributions.json")"
   [ ! -s "$home/state/.wake-queue" ] || fail 'terminal merged failure enqueued a wake'
   bearings "$home" | jq -e '
     .contributions.known == 1 and .contributions.checked == 1
     and .contributions.counts == {captain:0,fleet:0,maintainer:0,nobody:1}' >/dev/null \
     || fail 'terminal merged failure lost the nobody/merged bearings state'
-  pass 'an already-merged PR stays silent and preserves its record on forge re-check failure'
+  pass 'an already-merged PR stays silent, keeps its observation, and records the attempt'
+}
+
+test_closed_pr_recheck_failure_is_unavailable() {
+  local home out
+  home=$(new_home reopened-closed)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].observation.state="closed"'
+  printf 'fail\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on a failed re-check of a closed contribution'
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
+    || fail "a failed re-check of a reopened contribution was swallowed: $out"
+  jq -e --arg now "$NOW" '.records[0].checked_at == $now
+    and .records[0].error == "forge observation unavailable or changed during read"' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a failed re-check of a closed contribution left no error evidence'
+  bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
+    and .contributions.counts == {captain:0,fleet:1,maintainer:0,nobody:0}' >/dev/null \
+    || fail 'a reopened contribution stayed nobody work behind a stale closed observation'
+  pass 'closed is reversible: a failed re-check of it is unavailable, not terminal'
 }
 
 test_merged_pr_skips_unneeded_checks_and_captures_comments() {
-  local home out count wake_count
+  local home out count
   home=$(new_home merged-skips-checks)
   forge_home "$home"
   wrap_forge "$home"
@@ -665,18 +694,20 @@ test_merged_pr_skips_unneeded_checks_and_captures_comments() {
     .records[0].checked_at == $now
     and .records[0].error == null
     and .records[0].observation.state == "merged"
+    and ((.records[0].observation.absent_checks // []) | length == 0)
     and (.records[0].pending | length == 1)
     and (.records[0].pending[0].author == "maintainer")' \
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail "merged PR did not capture maintainer comment: $(cat "$home/data/delivery/contributions.json")"
+  bearings "$home" | jq -e '.contributions.missing_verdicts == 0' >/dev/null \
+    || fail 'a merged PR counted its pre-merge lanes as missing verdicts'
   [ -s "$home/state/.wake-queue" ] || fail 'merged PR comment never enqueued a wake'
-  count=$(wc -l < "$home/state/.wake-queue")
-  wake_count=$(awk 'END { print NR }' "$home/state/.wake-queue")
-  [ "$wake_count" = 1 ] || fail 'merged PR comment did not enqueue exactly one wake'
+  count=$(awk 'END { print NR }' "$home/state/.wake-queue")
+  [ "$count" = 1 ] || fail 'merged PR comment did not enqueue exactly one wake'
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 're-poll on merged PR failed'
   [ -z "$out" ] || fail "re-poll on merged PR re-woke: $out"
-  [ "$(wc -l < "$home/state/.wake-queue")" = "$count" ] || fail 're-poll duplicated wake in queue'
+  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = "$count" ] || fail 're-poll duplicated wake in queue'
   pass 'merged PR skips unneeded checks calls, captures post-merge comment, and wakes once'
 }
 
@@ -797,8 +828,9 @@ for test_name in \
   test_unreadable_pending_is_not_empty \
   test_budget_refusal_between_calls \
   test_budget_bounded_call_timeout \
-  test_default_budget_bounded_call_timeout \
-  test_terminal_merged_failure_stays_silent_and_keeps_record \
+  test_per_call_timeout_records_and_rotates \
+  test_terminal_merged_failure_stays_silent_and_keeps_observation \
+  test_closed_pr_recheck_failure_is_unavailable \
   test_merged_pr_skips_unneeded_checks_and_captures_comments \
   test_genuine_failure_near_deadline_is_unavailable \
   test_unsupported_forge_is_recorded_once_without_budget \

@@ -37,10 +37,12 @@
 # 1..25). Each gh call is bounded by the remaining budget and five seconds.
 # Oldest observations go first, so a large corpus progresses across polls.
 # Each distinct URL is observed once per poll and applied to every owner. When
-# the budget runs out mid-observation or a read times out, the poll ends with
-# that URL's records untouched; only a genuine forge failure or head change on
-# nonterminal work records an error. A stable terminal state preserves its
-# observation and stays quiet when a re-check fails.
+# the budget runs out mid-observation, the poll ends with that URL's records
+# untouched; a read killed at its own five-second bound is that URL's failure
+# and records an error, so the URL rotates behind the rest of the corpus. Only
+# a genuine forge failure or head change on unmerged work records an error. A
+# merged observation is permanent: it is preserved and stays quiet when a
+# re-check fails, and its check lanes are left as observed before the merge.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
@@ -182,8 +184,9 @@ forge() {
   if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$TMP/forge.err" || rc=$?
-  # Any read killed by timeout is budget exhaustion too.
-  [ "$rc" -ne 124 ] || BUDGET_EXHAUSTED=1
+  # A read killed at the budget's own deadline is budget exhaustion too; one
+  # killed at the per-call bound is this URL's failure and leaves budget.
+  [ "$rc" -ne 124 ] || [ "$bounded" -eq 0 ] || BUDGET_EXHAUSTED=1
   return "$rc"
 }
 
@@ -301,9 +304,11 @@ poll() {
     # An observation the budget cut short is unmeasured, not unavailable: keep
     # every owner's prior record so the URL is observed first next poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
+    # Only a merge is permanent; a closed contribution can reopen and must be
+    # re-observed, so a failed re-check of it is still unavailable.
     terminal=0
     if jq -ne --arg url "$url" --slurpfile saved "$TMP/saved.json" '
-      ($saved[0] // []) | any(.[].records[]?; .url == $url and ((.observation.state // "") | IN("merged","closed")))' >/dev/null 2>&1; then
+      ($saved[0] // []) | any(.[].records[]?; .url == $url and (.observation.state // "") == "merged")' >/dev/null 2>&1; then
       terminal=1
     fi
     [ "$observed" -eq 0 ] || [ "$observed" -eq 2 ] || [ "$terminal" -eq 1 ] \
@@ -322,7 +327,8 @@ poll() {
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
               else [] end)) as $events
           | $old + {checked_at:$now,error:null,
-            observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
+            observation:($o + {absent_checks:(if $o.state == "merged" then ($old.observation.absent_checks // [])
+              else ((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique) end)}),
             seen:($events | map(.token)),
             pending:(($old.pending // [])
               + [$events[]
@@ -331,13 +337,11 @@ poll() {
       elif [ "$observed" -eq 2 ]; then
         cp "$old" "$TMP/row.json"
       elif [ "$terminal" -eq 1 ]; then
-        if jq -e '((.observation.state // "") | IN("merged","closed"))' "$old" >/dev/null 2>&1; then
-          cp "$old" "$TMP/row.json"
-        else
-          jq -n --slurpfile saved "$TMP/saved.json" --slurpfile old "$old" --arg url "$url" '
-            ([($saved[0] // [])[].records[]? | select(.url == $url and ((.observation.state // "") | IN("merged","closed")))] | first) as $ref
-            | if $ref != null then $old[0] + {checked_at:$ref.checked_at, observation:$ref.observation, error:null} else $old[0] end' > "$TMP/row.json"
-        fi
+        # The merged observation stands, but the attempt is recorded so the URL
+        # rotates behind the rest of the corpus instead of pinning the queue.
+        jq -n --arg now "$NOW" --slurpfile saved "$TMP/saved.json" --slurpfile old "$old" --arg url "$url" '
+          ([($saved[0] // [])[].records[]? | select(.url == $url and (.observation.state // "") == "merged") | .observation] | first) as $merged
+          | $old[0] + {checked_at:$now, observation:$merged, error:null}' > "$TMP/row.json"
       else
         error='forge observation unavailable or changed during read'
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
