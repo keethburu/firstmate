@@ -46,7 +46,8 @@
 # record's own merged observation is permanent: a failed re-check preserves it
 # and does not repeat the unavailable line, but still records the error, so
 # checked_at is the time of the attempt and the gap stays disclosed until a read
-# succeeds. Every other owner of that URL still observes it itself. A merge
+# succeeds. That quiet is per record: any other owner of the same URL whose own
+# record is not merged still reports the unavailable line for it. A merge
 # stops reading check lanes, merge permission and review decision: on a merged
 # record observation.checks, .can_merge and .review_decision repeat that
 # record's own last pre-merge observation of them, or, when it never observed
