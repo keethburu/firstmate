@@ -41,8 +41,11 @@
 # untouched; a read killed at its own five-second bound is that URL's failure
 # and records an error, so the URL rotates behind the rest of the corpus. Only
 # a genuine forge failure or head change on unmerged work records an error. A
-# merged observation is permanent: it is preserved and stays quiet when a
-# re-check fails, and its check lanes are left as observed before the merge.
+# record's own merged observation is permanent: it is preserved and stays quiet
+# when a re-check fails, and every other owner of that URL still observes it
+# itself. A merge stops reading check lanes, merge permission and review
+# decision, so observation.checks, .can_merge and .review_decision on a merged
+# record are that record's last pre-merge observation of them.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
@@ -278,7 +281,7 @@ publish_pending() { # task canonical-url record-file
 }
 
 poll() {
-  local task url old kind error observed
+  local task url old kind error observed unavailable
   local -a row
   acquire
   get_input
@@ -304,16 +307,8 @@ poll() {
     # An observation the budget cut short is unmeasured, not unavailable: keep
     # every owner's prior record so the URL is observed first next poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
-    # Only a merge is permanent; a closed contribution can reopen and must be
-    # re-observed, so a failed re-check of it is still unavailable.
-    terminal=0
-    if jq -ne --arg url "$url" --slurpfile saved "$TMP/saved.json" '
-      ($saved[0] // []) | any(.[].records[]?; .url == $url and (.observation.state // "") == "merged")' >/dev/null 2>&1; then
-      terminal=1
-    fi
-    [ "$observed" -eq 0 ] || [ "$observed" -eq 2 ] || [ "$terminal" -eq 1 ] \
-      || printf 'contributions: observation unavailable for %s\n' "$url"
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
+    unavailable=0
     for task in "${row[@]:1}"; do
       fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
       old="$TMP/old.json"
@@ -326,9 +321,15 @@ poll() {
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
               else [] end)) as $events
+          | (if $o.state == "merged" and $old.observation != null then
+              {absent_checks:($old.observation.absent_checks // []),
+               checks:($old.observation.checks // []),
+               can_merge:($old.observation.can_merge // false),
+               review_decision:($old.observation.review_decision // "")}
+             else {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}
+             end) as $carried
           | $old + {checked_at:$now,error:null,
-            observation:($o + {absent_checks:(if $o.state == "merged" then ($old.observation.absent_checks // [])
-              else ((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique) end)}),
+            observation:($o + $carried),
             seen:($events | map(.token)),
             pending:(($old.pending // [])
               + [$events[]
@@ -336,19 +337,21 @@ poll() {
               | unique_by(.token))}' > "$TMP/row.json"
       elif [ "$observed" -eq 2 ]; then
         cp "$old" "$TMP/row.json"
-      elif [ "$terminal" -eq 1 ]; then
-        # The merged observation stands, but the attempt is recorded so the URL
-        # rotates behind the rest of the corpus instead of pinning the queue.
-        jq -n --arg now "$NOW" --slurpfile saved "$TMP/saved.json" --slurpfile old "$old" --arg url "$url" '
-          ([($saved[0] // [])[].records[]? | select(.url == $url and (.observation.state // "") == "merged") | .observation] | first) as $merged
-          | $old[0] + {checked_at:$now, observation:$merged, error:null}' > "$TMP/row.json"
+      elif jq -e '(.observation.state // "") == "merged"' "$old" >/dev/null 2>&1; then
+        # Only this record's own merge is permanent, and a closed contribution
+        # can reopen; the attempt is still recorded so the URL rotates behind
+        # the rest of the corpus instead of pinning the queue.
+        jq --arg now "$NOW" '.checked_at=$now | .error=null' "$old" > "$TMP/row.json"
       else
         error='forge observation unavailable or changed during read'
+        unavailable=1
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"
     done
+    [ "$unavailable" -eq 0 ] \
+      || printf 'contributions: observation unavailable for %s\n' "$url"
   done < "$TMP/known.tsv"
 }
 

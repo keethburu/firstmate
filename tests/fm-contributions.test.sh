@@ -606,7 +606,9 @@ test_per_call_timeout_records_and_rotates() {
   forge_home "$home"
   wrap_forge "$home"
   printf -- '- [ ] filed - Filed https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
-  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  # Both entries sort at the queue head; "delivery" beats "filed" on the
+  # tie-break, so the slow URL is observed before the other owned URL.
+  mutate_record "$home" delivery '.records[0].checked_at=null'
   printf 'timeout\n' > "$home/forge/fault"
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed on a per-call read timeout'
@@ -616,6 +618,8 @@ test_per_call_timeout_records_and_rotates() {
     and .records[0].error == "forge observation unavailable or changed during read"' \
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail 'a repeatedly slow URL kept its old checked_at and stays first next poll'
+  [ "$(grep -n -Fx 'api repos/o/r/pulls/8' "$home/forge/calls" | head -1 | cut -d: -f1)" = 1 ] \
+    || fail "the slow URL was not observed first: $(cat "$home/forge/calls")"
   grep -Fx 'api repos/o/r/issues/9' "$home/forge/calls" >/dev/null \
     || fail 'a per-call read timeout ended the poll before the next owned URL'
   bearings "$home" | jq -e '.contributions.known == 2 and .contributions.checked == 1
@@ -670,12 +674,37 @@ test_closed_pr_recheck_failure_is_unavailable() {
   pass 'closed is reversible: a failed re-check of it is unavailable, not terminal'
 }
 
+test_new_owner_of_merged_url_observes_it_itself() {
+  local home out
+  home=$(new_home merged-new-owner)
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" delivery 8 merged mergeable
+  printf -- '- [ ] duplicate - Filed https://github.com/o/r/pull/8 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  printf 'fail-core\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed for a task that newly links a merged URL'
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
+    || fail "an owner that never observed the merged URL was silently terminal: $out"
+  jq -e --arg now "$NOW" '.records[0].checked_at == $now and .records[0].observation == null
+    and .records[0].error == "forge observation unavailable or changed during read"' \
+    "$home/data/duplicate/contributions.json" >/dev/null \
+    || fail "a new owner took a sibling's merged observation: $(cat "$home/data/duplicate/contributions.json")"
+  jq -e '.records[0].error == null and .records[0].observation.state == "merged"' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'the merged owner lost its own observation'
+  bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
+    and .contributions.counts == {captain:0,fleet:1,maintainer:0,nobody:0}' >/dev/null \
+    || fail 'an unobserved owner of a merged URL was counted as measured silence'
+  pass 'a task that newly links a merged URL must observe it itself'
+}
+
 test_merged_pr_skips_unneeded_checks_and_captures_comments() {
   local home out count
   home=$(new_home merged-skips-checks)
   forge_home "$home"
   wrap_forge "$home"
-  record "$home" delivery 8 merged mergeable
+  mutate_record "$home" delivery '.records[0].observation.can_merge=true'
   printf 'merged\n' > "$home/forge/fault"
   jq -n --arg head "$HEAD_A" '[{id:42,user:{login:"maintainer"},author_association:"MEMBER",
     body:"Thanks for the contribution!",html_url:"https://github.com/o/r/pull/8#issuecomment-42",
@@ -695,6 +724,9 @@ test_merged_pr_skips_unneeded_checks_and_captures_comments() {
     and .records[0].error == null
     and .records[0].observation.state == "merged"
     and ((.records[0].observation.absent_checks // []) | length == 0)
+    and ([.records[0].observation.checks[].name] == ["test"])
+    and .records[0].observation.can_merge == true
+    and .records[0].observation.review_decision == "APPROVED"
     and (.records[0].pending | length == 1)
     and (.records[0].pending[0].author == "maintainer")' \
     "$home/data/delivery/contributions.json" >/dev/null \
@@ -831,6 +863,7 @@ for test_name in \
   test_per_call_timeout_records_and_rotates \
   test_terminal_merged_failure_stays_silent_and_keeps_observation \
   test_closed_pr_recheck_failure_is_unavailable \
+  test_new_owner_of_merged_url_observes_it_itself \
   test_merged_pr_skips_unneeded_checks_and_captures_comments \
   test_genuine_failure_near_deadline_is_unavailable \
   test_unsupported_forge_is_recorded_once_without_budget \
