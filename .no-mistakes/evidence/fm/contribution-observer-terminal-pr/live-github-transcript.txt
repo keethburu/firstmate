@@ -1,0 +1,150 @@
+fm-contributions driven against the real github.com through the real gh CLI.
+Each section stands up an isolated Firstmate home (own data/, state/, config/)
+and runs the shipped bin/fm-contributions.sh and bin/fm-bearings-snapshot.sh.
+The only wrapper around gh is a logger that execs /usr/bin/gh, so every
+"forge read" line below is a request that actually went to github.com.
+PRs used: 14337 (merged, two MEMBER reviews), 14448 (closed, never merged),
+13788 (open, three failing lanes).
+Two reading notes:
+  * Section A's last block reprojects the record the NEW poll wrote, so both
+    builds agree there; the real base/target contrast is section A2, where the
+    base build does its own poll of the same merged PR.
+  * Section G's first attempt is left in place but is void: its seed poll was
+    rate-limited, so one record was missing. It was re-driven cleanly in the
+    second G section at the end of this file.
+
+
+========== A. a PR first seen as merged: what the poll reads, and what the row claims ==========
+--- fm-contributions.sh poll (stdout):
+contribution-wake: check: contributions landed 19f3715a0e9b5b028ff812bcb62071574483c10ac3e62d3a5ed48303ec771a97
+contribution-wake: check: contributions landed b4b38ede4a31eebe19429cb26c0687c842fb752e0782871f1263137a09a29fc6
+--- forge reads this poll made against github.com:
+api repos/cli/cli/pulls/14337
+api repos/cli/cli/issues/14337/comments?per_page=100 --paginate --slurp
+api repos/cli/cli/pulls/14337/reviews?per_page=100 --paginate --slurp
+api repos/cli/cli/pulls/14337/comments?per_page=100 --paginate --slurp
+--- stored record (fm-contributions.v1):
+{"url":"https://github.com/cli/cli/pull/14337","error":null,"observation":{"state":"merged","can_merge":false,"review_decision":"","checks":[],"absent_checks":[]},"signals":[{"type":"review","author":"babakks"},{"type":"review","author":"BagToad"}]}
+--- snapshot --all row:
+{"counts":{"captain":0,"fleet":0,"maintainer":0,"nobody":1},"missing_verdicts":0,"complete":true,"proven_clear":true,"row":{"actor":"nobody","reason":"forge reports merged","checked":true,"distinct_checks":0,"missing_verdicts":0,"pending_checks":0,"failed_checks":0,"signals":2}}
+--- the same live record projected by the BASE build (aa3c386):
+{"counts":{"captain":0,"fleet":0,"maintainer":0,"nobody":1},"missing_verdicts":0,"complete":true,"proven_clear":true,"row":{"actor":"nobody","reason":"forge reports merged","checked":true,"distinct_checks":0,"missing_verdicts":0,"pending_checks":0,"failed_checks":0,"signals":2}}
+
+========== B. merge carries the pre-merge reading as history and retires the lane gap ==========
+--- prior poll's record (lane objects read from github.com; one lane seen to disappear):
+{"state":"open","review_decision":"APPROVED","can_merge":true,"lanes":11,"absent_checks":["required-extra"]}
+--- row while it is still open:
+{"counts":{"captain":0,"fleet":1,"maintainer":0,"nobody":0},"missing_verdicts":1,"complete":true,"proven_clear":true,"row":{"actor":"fleet","reason":"check lane has no verdict","checked":true,"distinct_checks":11,"missing_verdicts":1,"pending_checks":0,"failed_checks":0,"signals":0}}
+--- poll once github.com reports the merge:
+{"state":"merged","review_decision":"APPROVED","can_merge":true,"history_lanes":11,"absent_checks":"key absent"}
+--- row after the merge:
+{"counts":{"captain":0,"fleet":0,"maintainer":0,"nobody":1},"missing_verdicts":0,"complete":true,"proven_clear":true,"row":{"actor":"nobody","reason":"forge reports merged","checked":true,"distinct_checks":0,"missing_verdicts":0,"pending_checks":0,"failed_checks":0,"signals":2}}
+--- bearings:
+{"known":1,"checked":1,"counts":{"captain":0,"fleet":0,"maintainer":0,"nobody":1},"missing_verdicts":0,"complete":true,"proven_clear":true}
+
+========== C. open work still reads and reports every lane (real PR with three failing lanes) ==========
+--- forge reads:
+api repos/cli/cli/pulls/13788
+api repos/cli/cli/issues/13788/comments?per_page=100 --paginate --slurp
+api repos/cli/cli/pulls/13788/reviews?per_page=100 --paginate --slurp
+api repos/cli/cli/pulls/13788/comments?per_page=100 --paginate --slurp
+api repos/cli/cli/commits/2537a3b6931a787d6b4b0ab686cd4cf7eda0dfda/check-runs?filter=all&per_page=100 --paginate --slurp
+api repos/cli/cli/commits/2537a3b6931a787d6b4b0ab686cd4cf7eda0dfda/statuses?per_page=100 --paginate --slurp
+api repos/cli/cli
+pr view https://github.com/cli/cli/pull/13788 --json headRefOid,reviewDecision
+{"state":"open","lanes":11,"red":["build (ubuntu-latest)","build (windows-latest)","build (macos-latest)"]}
+--- row:
+{"counts":{"captain":0,"fleet":1,"maintainer":0,"nobody":0},"missing_verdicts":0,"complete":true,"proven_clear":true,"row":{"actor":"fleet","reason":"checks failed","checked":true,"distinct_checks":11,"missing_verdicts":0,"pending_checks":0,"failed_checks":3,"signals":0}}
+
+========== D. merged record, real forge outage (HTTP 401), then recovery ==========
+--- healthy:
+{"checked_at":"2026-09-17T23:41:50Z","error":null,"state":"merged"}
+{"known":1,"checked":1,"counts":{"captain":0,"fleet":0,"maintainer":0,"nobody":1},"missing_verdicts":0,"complete":true,"proven_clear":true}
+--- poll during the outage (stdout):
+[]
+{"checked_at":"2026-09-17T23:42:01Z","error":"forge observation unavailable or changed during read","state":"merged"}
+observation preserved: yes
+--- bearings during the outage:
+{"known":1,"checked":0,"counts":{"captain":0,"fleet":1,"maintainer":0,"nobody":0},"missing_verdicts":0,"complete":false,"proven_clear":false}
+--- poll after credentials are restored (stdout):
+[]
+{"checked_at":"2026-09-17T23:42:05Z","error":null,"state":"merged","signals":2}
+--- bearings after recovery:
+{"known":1,"checked":1,"counts":{"captain":0,"fleet":0,"maintainer":0,"nobody":1},"missing_verdicts":0,"complete":true,"proven_clear":true}
+wake-queue rows: before=2 after=2
+
+========== E. closed-but-unmerged work under the same outage still reports it out loud ==========
+{"error":null,"state":"closed","lanes":7}
+--- poll during the outage (stdout):
+[contributions: observation unavailable for https://github.com/cli/cli/pull/14448]
+{"checked_at":"2026-09-17T23:42:33Z","error":"forge observation unavailable or changed during read"}
+{"known":1,"checked":0,"counts":{"captain":0,"fleet":1,"maintainer":0,"nobody":0},"missing_verdicts":0,"complete":false,"proven_clear":false}
+
+========== F. a second task that newly links the merged URL must observe it itself ==========
+--- poll during the outage (stdout):
+[contributions: observation unavailable for https://github.com/cli/cli/pull/14337]
+new owner:
+{"error":"forge observation unavailable or changed during read","observation":null}
+first owner:
+{"error":"forge observation unavailable or changed during read","state":"merged"}
+{"known":1,"checked":0,"counts":{"captain":0,"fleet":1,"maintainer":0,"nobody":0},"missing_verdicts":0,"complete":false,"proven_clear":false}
+
+========== G. a read stalled past its own five-second bound is that URL's failure, not the poll's end ==========
+cp: cannot stat '/tmp/fmlive/ev-g/data/landed/contributions.json': No such file or directory
+abandoned: checked_at=2026-09-17T23:42:54Z error=forge observation unavailable or changed during read
+--- poll with github.com black-holed at the TCP level, 20s budget:
+stdout: [contributions: observation unavailable for https://github.com/cli/cli/pull/14337
+contributions: observation unavailable for https://github.com/cli/cli/pull/14448]
+elapsed: 12s
+URLs attempted:
+api repos/cli/cli/pulls/14337
+api repos/cli/cli/pulls/14448
+abandoned: checked_at=2026-09-17T23:43:19Z error=forge observation unavailable or changed during read
+landed: checked_at=2026-09-17T23:43:19Z error=forge observation unavailable or changed during read
+--- same stall with a 1-second budget (the budget refuses the read):
+cp: cannot stat '/tmp/fmlive/ev-g/landed.prior.json': No such file or directory
+stdout: []
+landed: record rewritten
+abandoned: prior record untouched
+
+========== A2. the same merged PR polled by the BASE build (aa3c386), for comparison with A/B ==========
+--- identical pre-merge record to scenario B; now polled by the base build:
+--- forge reads the base build made on a merged PR:
+api repos/cli/cli/pulls/14337
+api repos/cli/cli/issues/14337/comments?per_page=100 --paginate --slurp
+api repos/cli/cli/pulls/14337/reviews?per_page=100 --paginate --slurp
+api repos/cli/cli/pulls/14337/comments?per_page=100 --paginate --slurp
+api repos/cli/cli/commits/4a75987727d9a40c58546914e9fd74e6485b9443/check-runs?filter=all&per_page=100 --paginate --slurp
+api repos/cli/cli/commits/4a75987727d9a40c58546914e9fd74e6485b9443/statuses?per_page=100 --paginate --slurp
+api repos/cli/cli
+pr view https://github.com/cli/cli/pull/14337 --json headRefOid,reviewDecision
+{"state":"merged","history_lanes":11,"absent_checks":["required-extra"]}
+--- base row:
+{"counts":{"captain":0,"fleet":0,"maintainer":0,"nobody":1},"missing_verdicts":1,"row":{"actor":"nobody","distinct_checks":11,"missing_verdicts":1,"pending_checks":0,"failed_checks":0}}
+
+========== G. a read stalled past its own five-second bound is that URL's failure, not the poll's end ==========
+--- both URLs measured before the stall:
+abandoned: checked_at=2026-09-17T23:44:41Z error=null state=closed
+landed: checked_at=2026-09-17T23:45:09Z error=null state=merged
+--- poll with github.com black-holed at the TCP level, 20s budget:
+stdout: [contributions: observation unavailable for https://github.com/cli/cli/pull/14448]
+elapsed: 11s
+URLs attempted:
+api repos/cli/cli/pulls/14448
+api repos/cli/cli/pulls/14337
+abandoned: checked_at=2026-09-17T23:45:34Z error=forge observation unavailable or changed during read observation_kept=true
+landed: checked_at=2026-09-17T23:45:34Z error=forge observation unavailable or changed during read observation_kept=true
+--- same stall with a 1-second budget (the budget, not the forge, refuses the read):
+stdout: []
+landed: prior record untouched
+abandoned: prior record untouched
+
+========== H. a merge over unresolved lanes: history kept, no current failure claimed ==========
+--- lane objects read from github.com (PR 13788, three failing builds):
+[{"name":"build (ubuntu-latest)","conclusion":"failure"},{"name":"build (windows-latest)","conclusion":"failure"},{"name":"build (macos-latest)","conclusion":"failure"}]
+--- while the record says open:   {"counts":{"captain":0,"fleet":1,"maintainer":0,"nobody":0},"row":{"actor":"fleet","reason":"checks failed","distinct_checks":3,"missing_verdicts":0,"pending_checks":0,"failed_checks":3}}
+--- while the record says closed: {"counts":{"captain":0,"fleet":0,"maintainer":0,"nobody":1},"row":{"actor":"nobody","reason":"forge reports closed","distinct_checks":3,"missing_verdicts":0,"pending_checks":0,"failed_checks":3}}
+--- poll; github.com reports the PR merged:
+{"state":"merged","lane_history":[{"name":"build (ubuntu-latest)","conclusion":"failure"},{"name":"build (windows-latest)","conclusion":"failure"},{"name":"build (macos-latest)","conclusion":"failure"}]}
+--- after the merge:              {"counts":{"captain":0,"fleet":0,"maintainer":0,"nobody":1},"row":{"actor":"nobody","reason":"forge reports merged","distinct_checks":0,"missing_verdicts":0,"pending_checks":0,"failed_checks":0}}
+{"known":1,"checked":1,"counts":{"captain":0,"fleet":0,"maintainer":0,"nobody":1},"missing_verdicts":0,"complete":true,"proven_clear":true}

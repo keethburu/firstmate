@@ -1,0 +1,45 @@
+ok - only required-captain contributions are rows; other actors are counted
+ok - replaced-head verdict is stale and cannot create a captain requirement
+ok - unchecked ownership is disclosed and cannot prove silence
+ok - newest check with no verdict is distinct from passing and pending
+ok - new maintainer comment wakes once and stays pending until acknowledged
+ok - new maintainer review wakes once and stays pending until acknowledged
+ok - new maintainer inline wakes once and stays pending until acknowledged
+ok - ready-for-pr on a filed issue becomes a planning wake
+ok - a fresh open issue remains measured maintainer triage
+ok - an absent check lane remains missing across repeated observations
+ok - mixed freshness retains measured captain work and discloses the gap
+ok - malformed durable evidence cannot prove silence
+ok - a transient ready-for-pr label wakes and its exact acknowledgement survives replay
+ok - recorded judgment keeps its exact head and is stale immediately on a published replacement
+ok - a current forge observation refreshes a verdict after a replacement
+ok - an unavailable current head leaves verdict freshness unknown
+ok - away yolo delivery is fleet work without granting merge authority
+ok - cross-home away yolo delivery is fleet work
+ok - retired ownership persists and unsupported forge remains visibly unmeasured
+ok - unsupported forge coverage is disclosed without inventing fleet work
+ok - held unsupported forge coverage remains unmeasured
+ok - shared contribution signal wakes once while retaining both acknowledgements
+ok - watcher keeps observer diagnostics separate from contribution wakes
+ok - expired child unsupported-forge coverage remains unmeasured
+not ok - watcher did not surface the new contribution signal: 
+ok - parent consumes measured child coverage and refuses expired child silence
+ok - unreadable pending signals refuse an empty-inbox claim
+ok - budget exhausted mid-observation (exhaust) keeps the prior record and stays silent
+ok - budget exhausted mid-observation (hang) keeps the prior record and stays silent
+ok - a per-call read timeout records the attempt, rotates, and keeps observing the corpus
+ok - a merged re-check failure stays silent, discloses the gap, and recovers on the next read
+ok - closed is reversible: a failed re-check of it is unavailable, not terminal
+ok - a task that newly links a merged URL must observe it itself
+ok - a PR first seen as merged records schema defaults and claims no coverage
+ok - a merge retires the absent lane instead of freezing a verdict gap
+ok - merged lane history is kept but never counted as a current lane
+ok - merged PR skips unneeded checks calls, captures post-merge comment, and wakes once
+ok - a genuine forge failure inside the budget still records the error and wakes
+ok - unsupported forge is recorded once, visible, silent, and budget-free
+ok - a URL owned by two tasks is observed once and every owner receives the result
+not ok - 1 contribution regressions
+
+--- same suite at base commit aa3c386 (git archive of the base tree):
+not ok - watcher did not surface the new contribution signal: 
+not ok - 1 contribution regressions
