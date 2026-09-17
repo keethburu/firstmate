@@ -699,6 +699,34 @@ test_new_owner_of_merged_url_observes_it_itself() {
   pass 'a task that newly links a merged URL must observe it itself'
 }
 
+test_first_observation_after_merge_claims_nothing() {
+  local home out
+  home=$(new_home first-sight-merged)
+  forge_home "$home"
+  wrap_forge "$home"
+  rm -f "$home/data/delivery/contributions.json"
+  printf 'merged\n' > "$home/forge/fault"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'poll failed on a first observation of an already-merged PR'
+  if grep -E 'check-runs|statuses|repos/o/r$|pr view' "$home/forge/calls" >/dev/null; then
+    fail "an already-merged PR was read for lanes it cannot have: $(cat "$home/forge/calls")"
+  fi
+  jq -e '.records[0].observation
+    | .state == "merged" and .checks == [] and .can_merge == false
+      and .review_decision == "" and (.absent_checks // []) == []' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "an unobserved pre-merge state was invented: $(cat "$home/data/delivery/contributions.json")"
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
+    || fail 'could not collect contribution input for a first-sight merged PR'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all) \
+    || fail 'could not project a first-sight merged PR'
+  printf '%s' "$out" | jq -e '.checked == 1 and .counts == {captain:0,fleet:0,maintainer:0,nobody:1}
+    and .missing_verdicts == 0
+    and (.rows[0] | .distinct_checks == 0 and .pending_checks == 0 and .failed_checks == 0)' >/dev/null \
+    || fail "defaults on a first-sight merged PR became claimed coverage: $out"
+  pass 'a PR first seen as merged records schema defaults and claims no coverage'
+}
+
 test_merged_pr_skips_unneeded_checks_and_captures_comments() {
   local home out count
   home=$(new_home merged-skips-checks)
@@ -864,6 +892,7 @@ for test_name in \
   test_terminal_merged_failure_stays_silent_and_keeps_observation \
   test_closed_pr_recheck_failure_is_unavailable \
   test_new_owner_of_merged_url_observes_it_itself \
+  test_first_observation_after_merge_claims_nothing \
   test_merged_pr_skips_unneeded_checks_and_captures_comments \
   test_genuine_failure_near_deadline_is_unavailable \
   test_unsupported_forge_is_recorded_once_without_budget \

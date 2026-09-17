@@ -44,8 +44,11 @@
 # record's own merged observation is permanent: it is preserved and stays quiet
 # when a re-check fails, and every other owner of that URL still observes it
 # itself. A merge stops reading check lanes, merge permission and review
-# decision, so observation.checks, .can_merge and .review_decision on a merged
-# record are that record's last pre-merge observation of them.
+# decision: on a merged record observation.checks, .can_merge and
+# .review_decision repeat that record's own last pre-merge observation of them,
+# or, when it never observed the work before the merge, carry the schema
+# defaults [], false and "". Neither form is a reading of the merged forge
+# state, and merged work claims no check coverage and no merge authority.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
