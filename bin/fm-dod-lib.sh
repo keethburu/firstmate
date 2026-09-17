@@ -88,15 +88,15 @@ fm_brief_task_placeholders_present() {  # <file>
 
 # Parse an exact ATX heading outside fenced blocks. Body mode prints through
 # the next unfenced heading at the same or a higher level; present mode reports
-# whether the heading exists.
-fm_brief_heading_parse() {  # <file|-> <heading> <body|present>
+# whether the heading exists. Replace mode keeps the document around a new body.
+fm_brief_heading_parse() {  # <file|-> <heading> <body|present|replace> [replacement]
   local file=$1 heading=$2 mode=$3 input=$1
   if [ "$file" = - ]; then
     input=/dev/stdin
   else
     [ -f "$file" ] || { [ "$mode" = body ]; return; }
   fi
-  awk -v heading="$heading" -v mode="$mode" '
+  FM_BRIEF_REPLACEMENT=${4:-} awk -v heading="$heading" -v mode="$mode" '
     BEGIN {
       target_level = 0
       while (substr(heading, target_level + 1, 1) == "#") target_level++
@@ -132,21 +132,32 @@ fm_brief_heading_parse() {  # <file|-> <heading> <body|present>
         found = 1
         if (mode == "present") next
         grab = 1
+        if (mode == "replace") {
+          print line
+          printf "%s\n\n", ENVIRON["FM_BRIEF_REPLACEMENT"]
+        }
         next
       }
-      if (mode == "present" || !grab) next
+      if (mode == "present") next
+      if (!grab) {
+        if (mode == "replace") print line
+        next
+      }
       if (is_fence || was_fenced) {
-        print line
+        if (mode != "replace") print line
         next
       }
 
       level = 0
       while (substr(scan, level + 1, 1) == "#") level++
-      if (level > 0 && level <= target_level && substr(scan, level + 1, 1) ~ /^[[:space:]]?$/) exit
-      print line
+      if (level > 0 && level <= target_level && substr(scan, level + 1, 1) ~ /^[[:space:]]?$/) {
+        if (mode != "replace") exit
+        grab = 0
+      }
+      if (mode != "replace" || !grab) print line
     }
     END {
-      if (mode == "present" && !found) exit 1
+      if (mode != "body" && !found) exit 1
     }
   ' "$input"
 }
@@ -157,6 +168,10 @@ fm_brief_heading_body() {  # <file> <heading>
 
 fm_brief_heading_present() {  # <file> <heading>
   fm_brief_heading_parse "$1" "$2" present >/dev/null
+}
+
+fm_brief_heading_replace() {  # <file|-> <heading> <replacement>
+  fm_brief_heading_parse "$1" "$2" replace "$3"
 }
 
 fm_brief_task_heading_body() {  # <file> <heading>

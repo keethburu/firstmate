@@ -30,7 +30,7 @@
 #   secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   Bounded execution enrollment and classified continuation are owned by
-#   fm-execution.sh --help; --bounded enrolls explicitly and --restart-from <id>
+#   fm-execution.sh --help; --restart-from <id>
 #   creates the clean successor of a structurally failed enrolled task.
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
@@ -588,7 +588,6 @@ for a in "$@"; do
     KIND_SET=1
     ;;
   --relaunch) RELAUNCH=1 ;;
-  --bounded) EXECUTION_BOUNDED=1 ;;
   --restart-from) want_value=restart_from ;;
   --harness) want_value=harness ;;
   --harness=*)
@@ -1286,7 +1285,7 @@ spawn_herdr_presentation_order_lock_release() {
 # one (task ids are bare slugs), so they fall straight through to the logic below.
 idpart=${POS[0]:-}
 idpart=${idpart%%=*}
-if [ "$EXECUTION_BOUNDED" = 1 ] || [ -n "$EXECUTION_RESTART" ]; then
+if [ -n "$EXECUTION_RESTART" ]; then
   [ "$KIND" = ship ] && [ "${POS[0]:-}" = "$idpart" ] || {
     echo 'error: bounded execution flags require a single ship task' >&2
     exit 1
@@ -2809,7 +2808,10 @@ freshen_spawn_worktree_base() { # <worktree>
     return 1
   fi
   if [ -n "${EXECUTION_BASE:-}" ]; then
-    git -C "$worktree" checkout --detach "$EXECUTION_BASE" >/dev/null || return 1
+    git -C "$worktree" checkout --detach "$EXECUTION_BASE" >/dev/null || {
+      echo "error: cannot restore original base '$EXECUTION_BASE' in '$worktree'; inspect the preserved source and verify its commit is available" >&2
+      return 1
+    }
     return 0
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then

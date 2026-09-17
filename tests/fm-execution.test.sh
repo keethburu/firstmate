@@ -87,13 +87,15 @@ SH
   printf 'run:\n  branch: %s\n  status: running\nbranch_sync:\n  local:\n    branch: %s\n  state: synchronized\n  safety: already_synchronized\n' \
     "$branch" "$branch" >"$FM_NM_OUTPUT"
   if execution _prepare initial initial codex test-repair high; then fail 'active run passed'; fi
-  printf 'current_branch: %s\nruns_on_current_branch: 0\n' "$branch" >"$FM_NM_OUTPUT"
+  printf 'current_branch: "%s"\nruns_on_current_branch: 0\n' "$branch" >"$FM_NM_OUTPUT"
   ticket=$(execution _prepare initial initial codex test-repair high)
   printf 'unknown response\n' >"$FM_NM_OUTPUT"
   if execution _consume initial "$ticket" codex test-repair high; then
     fail 'custody was not rechecked at launch'
   fi
-  printf 'current_branch: %s\nruns_on_current_branch: 0\n' "$branch" >"$FM_NM_OUTPUT"
+  printf '%s\n' 'run:' "  branch: \"$branch\"" '  status: "failed"' \
+    'branch_sync:' '  local:' "    branch: \"$branch\"" \
+    '  state: "user_owned"' '  safety: "user_owned"' >"$FM_NM_OUTPUT"
   execution _consume initial "$ticket" codex test-repair high
   unset FM_NM_OUTPUT
   echo 'ok - unknown and active custody fail closed, including after reservation'
@@ -102,6 +104,9 @@ SH
 test_native_structural_restart() {
   local base successor
   setup structural
+  # shellcheck disable=SC2016 # Fenced Markdown must retain literal backticks and escapes.
+  printf '\n```sh\n# build the image\nprintf "literal\\n"\n```\n\n~~~sh\n# second fence\n~~~\nAFTER BOTH FENCES\n' \
+    >>"$TASK_HOME/data/initial/brief.md"
   seed_attempt
   base=$(git -C "$WORKTREE" rev-parse HEAD)
   printf 'failed implementation\n' >"$WORKTREE/failed.txt"
@@ -114,6 +119,9 @@ test_native_structural_restart() {
     "$(git -C "$WORKTREE" rev-parse HEAD)"
   [ "$(git -C "$successor" rev-parse HEAD)" != "$base" ] || fail 'fixture did not diverge'
   fm_test_spawn_brief "$TASK_HOME" successor 'This is deliberately not the original request.'
+  # shellcheck disable=SC2016 # Literal Markdown fence, not shell command substitution.
+  printf '\n```sh\n# target comment\nTARGET SNIPPET MUST DISAPPEAR\n```\n' \
+    >>"$TASK_HOME/data/successor/brief.md"
   printf '\n# Status\nWrite to successor status only.\n' >>"$TASK_HOME/data/successor/brief.md"
   execution classify initial structural --evidence-file "$CASE_DIR/evidence"
   fm_test_run_spawn "$TASK_HOME" "$successor" "$FAKEBIN" successor "$PROJECT" \
@@ -122,8 +130,16 @@ test_native_structural_restart() {
     { cat "$CASE_DIR/restart.out"; fail 'native structural restart failed'; }
   [ "$(git -C "$successor" rev-parse HEAD)" = "$base" ] || fail 'wrong clean base'
   [ -f "$WORKTREE/failed.txt" ] && [ -f "$WORKTREE/unfinished.txt" ] || fail 'failed work lost'
-  assert_grep 'Implement the specified behavior' "$TASK_HOME/data/successor/launch-brief.md"
-  assert_grep 'Write to successor status only' "$TASK_HOME/data/successor/launch-brief.md"
+  assert_grep 'Implement the specified behavior' "$TASK_HOME/data/successor/launch-brief.md" \
+    'restart must retain original intent'
+  assert_grep 'Write to successor status only' "$TASK_HOME/data/successor/launch-brief.md" \
+    'restart must retain target status routing'
+  assert_grep 'AFTER BOTH FENCES' "$TASK_HOME/data/successor/launch-brief.md" \
+    'restart must preserve text after fenced headings'
+  assert_grep 'Exercise the spawn behavior under test.' "$TASK_HOME/data/successor/launch-brief.md" \
+    'restart must preserve original firstmate specification'
+  assert_no_grep 'TARGET SNIPPET MUST DISAPPEAR' "$TASK_HOME/data/successor/launch-brief.md" \
+    'replacement must remove the full fenced target Task section'
   if grep -q 'deliberately not the original' "$TASK_HOME/data/successor/launch-brief.md"; then
     fail 'restart changed original requirements'
   fi
@@ -137,7 +153,8 @@ test_native_enrollment() {
   execution status initial >"$CASE_DIR/status"
   jq -e '.phase == "running" and .attempt == 1 and (.base | length > 0)' \
     "$CASE_DIR/status" >/dev/null
-  assert_grep 'TARGETED EXECUTION INSTRUCTIONS' "$TASK_HOME/data/initial/launch-brief.md"
+  assert_grep 'TARGETED EXECUTION INSTRUCTIONS' "$TASK_HOME/data/initial/launch-brief.md" \
+    'initial worker must receive configured execution instructions'
   if execution _prepare initial initial codex test-repair high >"$CASE_DIR/refusal" 2>&1; then
     echo 'unclassified repair was accepted' >&2; exit 1
   fi
@@ -204,6 +221,9 @@ test_immutable_policy_and_safe_snapshots() {
     fail 'dangling original snapshot symlink was followed'
   fi
   [ ! -e "$CASE_DIR/must-not-exist" ] || fail 'symlink target was created'
+  if compgen -G "$TASK_HOME/data/initial/.execution.*" >/dev/null; then
+    fail 'failed enrollment left a temporary file behind'
+  fi
   echo 'ok - enrollment policy survives config removal and snapshots cannot follow links'
 }
 

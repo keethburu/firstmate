@@ -36,11 +36,9 @@ fm_execution_validate() {
           (contains("\u0000") | not)))) and
     ((has("bounded") | not) or (.bounded |
       type == "object" and
-      ((keys - ["initial", "repair", "max_capacity_recoveries"]) | length == 0) and
+      ((keys - ["initial", "repair"]) | length == 0) and
       (.initial | type == "array" and length > 0 and all(.[]; profile)) and
       (.repair | profile) and
-      ((if has("max_capacity_recoveries") then .max_capacity_recoveries else 1 end) |
-        type == "number" and IN(0, 1)) and
       (.repair as $repair | all(.initial[]; . != $repair))))
   ' "$file" >/dev/null 2>&1 ||
     fm_execution_error "invalid $file; see fm-execution.sh --help"
@@ -80,7 +78,7 @@ fm_execution_record() {
   jq -e --arg root "$root" '
     .version == 1 and .root == $root and
     (.attempt | IN(1,2)) and (.recoveries | IN(0,1)) and
-    (.phase | IN("reserved", "launching", "running", "classified", "captain")) and
+    (.phase | IN("reserved", "launching", "running", "classified")) and
     (.current | type == "string") and (.policy | type == "object") and
     (.base | type == "string")
   ' "$dir/execution.json" >/dev/null ||
@@ -129,7 +127,7 @@ fm_execution_evidence() {
 
 fm_execution_classify() {
   local id=$1 class=$2 evidence=$3 retry=$4 record generation snapshot
-  case "$class" in salvageable|structural|capacity|external) ;;
+  case "$class" in salvageable|structural|capacity) ;;
     *) fm_execution_error "unknown failure class '$class'"; return 1 ;; esac
   case "$retry" in ''|*[!0-9]*)
     fm_execution_error "retry-after must be an epoch integer (0 if unknown)"; return 1 ;;
@@ -149,7 +147,7 @@ fm_execution_classify() {
   fm_execution_evidence "$evidence" "$snapshot" || return 1
   fm_execution_write "$record" --arg class "$class" --arg evidence "$snapshot" \
     --argjson retry "$retry" '
-      .phase = (if $class == "external" then "captain" else "classified" end) |
+      .phase = "classified" |
       .decision = {class:$class, evidence:$evidence, retry_after:$retry}
     '
 }
@@ -165,23 +163,30 @@ fm_execution_enroll() {
   fm_execution_validate "$CONFIG/crew-execution.json" || return 1
   jq -e '.bounded.initial | length > 0' "$CONFIG/crew-execution.json" >/dev/null ||
     { fm_execution_error "bounded policy is not configured"; return 1; }
-  tmp=$(mktemp "$dir/.execution.XXXXXX") || return 1
+  tmp=$(mktemp "$dir/.execution.XXXXXX") ||
+    { fm_execution_error "cannot create enrollment temporary file in $dir"; return 1; }
+  EXECUTION_TEMP=$tmp
   jq --arg id "$id" --arg project "$project" '
     {version:1, root:$id, current:$id, project:$project, policy:.bounded,
      attempt:1, recoveries:0, phase:"reserved", base:"", generation:"", ticket:""}
-  ' "$CONFIG/crew-execution.json" >"$tmp" || return 1
+  ' "$CONFIG/crew-execution.json" >"$tmp" ||
+    { fm_execution_error "cannot prepare enrollment for $id"; return 1; }
   if ! fm_execution_profile "$tmp" initial "$harness" "$model" "$effort"; then
     rm -f "$tmp"; return 1
   fi
-  [ -f "$dir/brief.md" ] && [ ! -L "$dir/brief.md" ] || return 1
+  [ -f "$dir/brief.md" ] && [ ! -L "$dir/brief.md" ] ||
+    { fm_execution_error "missing or unsafe original brief $dir/brief.md"; return 1; }
   (set -C; cat "$dir/brief.md" >"$dir/execution-original.md") ||
     { fm_execution_error "original snapshot exists or cannot be created"; return 1; }
-  mv "$tmp" "$file" || return 1
-  printf '%s\n' "$id" >"$dir/execution-root"
+  mv "$tmp" "$file" ||
+    { fm_execution_error "cannot publish enrollment $file"; return 1; }
+  EXECUTION_TEMP=
+  printf '%s\n' "$id" >"$dir/execution-root" ||
+    fm_execution_error "cannot publish lineage pointer for $id; inspect $file"
 }
 
 fm_execution_transition() {
-  local source=$1 target=$2 harness=$3 model=$4 effort=$5 record class attempt stage
+  local source=$1 target=$2 harness=$3 model=$4 effort=$5 record class attempt stage generation
   record=$(fm_execution_record "$source") || return 1
   fm_execution_lock "$record" || return 1
   jq -e --arg source "$source" '.current == $source and .phase == "classified"' \
@@ -195,16 +200,18 @@ fm_execution_transition() {
       [ "$attempt" = 1 ] ||
         { fm_execution_error "two outer attempts exhausted; return to captain"; return 1; }
       if [ "$class" = salvageable ]; then
-        [ "$source" = "$target" ] || return 1
+        [ "$source" = "$target" ] ||
+          { fm_execution_error "salvageable repair must reuse task $source"; return 1; }
       else
         [ "$source" != "$target" ] ||
           { fm_execution_error "structural failure requires --restart-from in a new task"; return 1; }
       fi ;;
     capacity)
-      [ "$source" = "$target" ] || return 1
+      [ "$source" = "$target" ] ||
+        { fm_execution_error "capacity recovery must reuse task $source"; return 1; }
       [ "$attempt" = 1 ] && stage=initial
       jq -e --argjson now "$(date +%s)" '
-        .recoveries < (.policy.max_capacity_recoveries // 1) and
+        .recoveries < 1 and
         .decision.retry_after <= $now
       ' "$record" >/dev/null ||
         { fm_execution_error "capacity recovery exhausted or reset not reached"; return 1; } ;;
@@ -212,6 +219,10 @@ fm_execution_transition() {
   esac
   fm_execution_profile "$record" "$stage" "$harness" "$model" "$effort" || return 1
   fm_execution_custody "$source" || return 1
+  generation=$(fm_meta_get "$STATE/$source.meta" spawn_gen)
+  jq -e --arg generation "$generation" '.generation == $generation' "$record" >/dev/null ||
+    { fm_execution_error "classification belongs to an older launch"; return 1; }
+  [ "${FM_EXECUTION_CHECK_ONLY:-0}" != 1 ] || return 0
   fm_execution_reserve "$record" "$source" "$target" "$class"
 }
 
@@ -220,8 +231,8 @@ fm_execution_reserve() {
   generation=$(fm_meta_get "$STATE/$source.meta" spawn_gen)
   jq -e --arg generation "$generation" '.generation == $generation' "$record" >/dev/null ||
     { fm_execution_error "classification belongs to an older launch"; return 1; }
+  fm_execution_stopped "$source" || return 1
   if [ "$source" != "$target" ]; then
-    fm_execution_stopped "$source" || return 1
     dir=$(fm_execution_task_dir "$target") || return 1
     [ ! -e "$dir/execution-root" ] && [ ! -L "$dir/execution-root" ] ||
       { fm_execution_error "restart target is already enrolled"; return 1; }
@@ -249,24 +260,49 @@ fm_execution_stopped() {
     *) fm_execution_error "source task $id is not positively stopped ($verdict)" ;; esac
 }
 
-fm_execution_handoff() {
-  local id=$1 record root evidence
-  record=$(fm_execution_record "$id") || return 1
+fm_execution_repair_setup() {
+  local id=$1 worktree branch dirty
+  worktree=$(fm_meta_get "$STATE/$id.meta" worktree)
+  branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD) ||
+    branch=$(git -C "$worktree" rev-parse --verify HEAD) ||
+    { fm_execution_error "cannot inspect branch in preserved worktree $worktree"; return 1; }
+  dirty=$(git -C "$worktree" status --porcelain) ||
+    { fm_execution_error "cannot inspect preserved changes in $worktree"; return 1; }
+  printf '%s\n' "Continue in the existing task worktree: $worktree" \
+    "Current branch or detached commit: $branch" \
+    'Do not create a new branch or assume the checkout is clean.' \
+    'Preserve inherited commits and uncommitted work until independently assessed.' \
+    'Verify pwd -P and git rev-parse --show-toplevel both identify this task worktree.' \
+    'If they identify another checkout or the primary checkout, stop and report the mismatch.'
+  if [ -n "$dirty" ]; then
+    printf '\nCurrent git status --porcelain:\n%s\n' "$dirty"
+  else
+    printf '\nThe checkout currently has no uncommitted changes.\n'
+  fi
+}
+
+fm_execution_handoff_document() {
+  local id=$1 record=$2 root task
   root=${record%/*}
   if [ "$(jq -r '.root' "$record")" = "$id" ]; then
-    cat "$root/execution-original.md" || return 1
+    cat "$root/execution-original.md"
   else
-    awk '
-      NR == FNR {
-        if ($0 == "# Task") { capture = 1; next }
-        if (/^# [^#]/) capture = 0
-        if (capture) task = task $0 "\n"
-        next
-      }
-      $0 == "# Task" { print; printf "%s", task; skipping = 1; next }
-      /^# [^#]/ { skipping = 0 }
-      !skipping { print }
-    ' "$root/execution-original.md" "$DATA/$id/brief.md" || return 1
+    task=$(fm_brief_heading_body "$root/execution-original.md" '# Task') || return 1
+    fm_brief_heading_replace "$DATA/$id/brief.md" '# Task' "$task" ||
+      { fm_execution_error "cannot replace Task section in successor brief for $id"; return 1; }
+  fi
+}
+
+fm_execution_handoff() {
+  local id=$1 record evidence document setup
+  record=$(fm_execution_record "$id") || return 1
+  document=$(fm_execution_handoff_document "$id" "$record") || return 1
+  if [ "$(jq -r '.previous // empty' "$record")" = "$id" ] &&
+    printf '%s\n' "$document" | fm_brief_heading_present - '# Setup'; then
+    setup=$(fm_execution_repair_setup "$id") || return 1
+    printf '%s\n' "$document" | fm_brief_heading_replace - '# Setup' "$setup" || return 1
+  else
+    printf '%s\n' "$document"
   fi
   evidence=$(jq -r '.decision.evidence // empty' "$record")
   [ -n "$evidence" ] || return 0
@@ -280,8 +316,8 @@ fm_execution_handoff() {
 
 # Exact dotted scalar path from TOON. Duplicate paths and missing fields fail.
 fm_execution_field() {
-  local input=$1 wanted=$2
-  printf '%s\n' "$input" | awk -v wanted="$wanted" '
+  local input=$1 wanted=$2 value
+  value=$(printf '%s\n' "$input" | awk -v wanted="$wanted" '
     /^[ ]*[a-z_]+:/ {
       match($0, /[^ ]/); depth = RSTART - 1
       text = substr($0, RSTART); key = text; sub(/:.*/, "", key)
@@ -293,7 +329,8 @@ fm_execution_field() {
       if (path == wanted) { count++; result = value }
     }
     END { if (count == 0) exit 2; if (count != 1) exit 1; print result }
-  '
+  ') || return $?
+  fm_nm_strip_quotes "$value"
 }
 
 fm_execution_custody_no_run() {
@@ -435,7 +472,7 @@ fm_execution_spawn_prepare() {
   EXECUTION_LAUNCH_TICKET=
   source=${EXECUTION_RESTART:-$ID}
   if record=$(fm_execution_record "$source"); then rc=0; else rc=$?; fi
-  case "$rc:$RELAUNCH:$EXECUTION_BOUNDED:$EXECUTION_RESTART" in 2:1:0:) return 0 ;; esac
+  case "$rc:$RELAUNCH:$EXECUTION_RESTART" in 2:1:) return 0 ;; esac
   case "$rc" in
     2)
       fm_execution_initial_profile || return 1

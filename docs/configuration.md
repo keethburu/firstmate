@@ -459,7 +459,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 ## Worker execution policy (config/crew-execution.json)
 
 `config/crew-execution.json` is optional, private, and inherited by secondmate homes.
-It contains `version: 1`, optional `harness_instructions` mapping harness names to nonempty instruction text, and optional `bounded` with `initial` (a nonempty profile array), `repair` (one distinct profile), and `max_capacity_recoveries` (0 or 1, default 1).
+It contains `version: 1`, optional `harness_instructions` mapping harness names to nonempty instruction text, and optional `bounded` with `initial` (a nonempty profile array) and `repair` (one distinct profile).
 Profiles contain exactly `harness`, `model`, and `effort`, using the same concrete adapter/model/effort values passed to spawn.
 Unknown fields and malformed values refuse launch; `bin/fm-execution.sh validate` checks the file without starting a worker.
 
@@ -468,19 +468,20 @@ Scouts and secondmates do not receive implementation instructions.
 Changing this text affects future launches; it does not impose hard tool-call limits on the worker.
 
 The initial profile array is an enrollment allowlist, not a routing candidate pool or a preference order.
-Ship launches matching it automatically enter bounded execution; an explicit enrollment flag is also available.
+Ship launches matching it automatically enter bounded execution.
 Ship launches on an initial harness require explicit model and effort so defaults cannot silently bypass enrollment.
 Dispatch rules still select profiles, including any separately configured reserve-capacity route.
 Nonmatching profiles and homes without this file retain their existing lifecycle.
 
 Enrolled tasks snapshot their bounded policy and retain it even if the configuration later changes or disappears.
-The lifecycle allows one initial implementation attempt and one repair attempt across task IDs and worktrees; no-mistakes internal fix rounds remain separate.
+The lifecycle allows one initial implementation attempt, one repair attempt, and at most one capacity recovery across task IDs and worktrees; no-mistakes internal fix rounds remain separate.
 A recorded generation-bound classification and objective evidence are required before continuation.
 Same-tree repair uses a fresh session with original requirements and evidence, while a structural restart preserves the failed worktree and starts a new task at the captured original base commit.
 The native launch paths refuse active or unproven no-mistakes custody, incorrect profiles, stale classifications, exhausted attempts, and premature capacity recovery.
 Failure classification remains supervisor judgment; the software enforces the recorded decision and does not claim to diagnose architectural errors.
 
-Reservations are conservative: failed or ambiguous launches retain their allocation and require captain attention rather than silently refunding an attempt.
+Continuation is checked before stopping the old agent, and its allocation is reserved only after a successful stop and a second locked check.
+Failed or ambiguous replacement launches retain their allocation and require captain attention rather than silently refunding an attempt.
 The operational commands, exact durable record contract, and recovery boundaries are owned by [`fm-execution.sh`](../bin/fm-execution.sh) and its help.
 Portable verification is in [`fm-execution.test.sh`](../tests/fm-execution.test.sh) and [`fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh).
 

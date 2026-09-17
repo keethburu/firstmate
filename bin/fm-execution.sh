@@ -2,14 +2,14 @@
 # Optional bounded execution policy and durable attempt records.
 # Usage: fm-execution.sh validate
 #        fm-execution.sh status <task-id>
-#        fm-execution.sh classify <task-id> <salvageable|structural|capacity|external>
+#        fm-execution.sh classify <task-id> <salvageable|structural|capacity>
 #          --evidence-file <path> [--retry-after <epoch-seconds>]
 #
 # config/crew-execution.json has version:1, optional harness_instructions mapping
 # harness names to instruction text, and optional bounded containing initial
-# (profile array), repair (one profile), max_capacity_recoveries (0 or 1; default 1).
+# (profile array) and repair (one profile).
 # A profile has harness, model and effort. Private policy is snapshotted on enrollment.
-# Matching initial ship profiles enroll automatically; --bounded enrolls explicitly.
+# Matching initial ship profiles enroll automatically.
 # This allowlist does not select a model or alter the dispatch candidate pool.
 # fm-control relaunch consumes a salvageable or
 # capacity classification. fm-spawn --restart-from <source> consumes a structural
@@ -19,7 +19,7 @@
 # The limit is two OUTER implementation attempts; no-mistakes internal rounds are separate.
 # Capacity recovery does not reset that count and is allowed at most once per lineage.
 # retry-after 0 means no known reset; a supplied future reset prevents early recovery.
-# External blockers and exhausted limits return control to the captain.
+# Exhausted limits return control to the captain.
 #
 # data/<root>/execution.json owns the lineage; execution-root links successor tasks.
 # The record survives teardown. A short-lived lineage lock serializes reservations,
@@ -58,7 +58,13 @@ fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 EXECUTION_LOCK=
-trap '[ -z "$EXECUTION_LOCK" ] || fm_lock_release "$EXECUTION_LOCK"; fm_lease_guard_release' EXIT
+EXECUTION_TEMP=
+execution_cleanup() {
+  [ -z "$EXECUTION_TEMP" ] || rm -f "$EXECUTION_TEMP"
+  [ -z "$EXECUTION_LOCK" ] || fm_lock_release "$EXECUTION_LOCK"
+  fm_lease_guard_release
+}
+trap execution_cleanup EXIT
 
 case "${1:-}" in
   --help|-h) sed -n '2,/^set /{ /^#/s/^# \{0,1\}//p; }' "$0"; exit 0 ;;
@@ -77,12 +83,17 @@ case "${1:-}" in
     fm_lease_guard "$id" 'classify bounded execution'
     fm_execution_classify "$id" "$class" "$evidence" "$retry"
     ;;
-  _prepare)
+  _check|_prepare)
+    action=$1
     shift
     if [ "${FM_EXECUTION_CONTROL_PARENT:-0}" != 1 ]; then
       fm_lease_guard "${1:?missing source task}" 'reserve bounded execution'
     fi
-    fm_execution_transition "$@"
+    if [ "$action" = _check ]; then
+      FM_EXECUTION_CHECK_ONLY=1 fm_execution_transition "$@"
+    else
+      fm_execution_transition "$@"
+    fi
     ;;
   _enroll)
     shift

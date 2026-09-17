@@ -1698,6 +1698,8 @@ test_bounded_repair_preserves_work_and_fresh_evidence() {
   rc=$?
   expect_code 0 "$rc" "activation must preserve legacy relaunch"$'\n'"$out"
   [ ! -e "$dir/home/data/bounded/execution-root" ] || fail 'legacy task was enrolled'
+  printf '\n# Setup\nAt a detached HEAD on a clean default branch.\nCreate branch fm/bounded now.\n' \
+    >>"$dir/home/data/bounded/brief.md"
   printf 'spawn_gen=initial-generation\n' >>"$dir/home/state/bounded.meta"
   FM_HOME="$dir/home" "$ROOT/bin/fm-execution.sh" _enroll \
     bounded "$dir/proj" claude initial high || fail 'enrollment failed'
@@ -1714,20 +1716,48 @@ test_bounded_repair_preserves_work_and_fresh_evidence() {
   [ "$(cat "$dir/fake/command")" = claude ] || fail 'refusal stopped worker'
   FM_HOME="$dir/home" "$ROOT/bin/fm-execution.sh" classify bounded salvageable \
     --evidence-file "$dir/evidence" || fail 'classification failed'
+  cp "$dir/home/data/bounded/execution.json" "$dir/lineage-before"
+  cp "$dir/home/data/bounded/brief.md" "$dir/brief-before"
+  printf i >"$dir/fake/composer"
   out=$(run_control "$dir" bounded relaunch --harness claude --model repair --effort high)
   rc=$?
+  expect_code 1 "$rc" "pending composer must refuse before reservation"$'\n'"$out"
+  cmp "$dir/lineage-before" "$dir/home/data/bounded/execution.json" ||
+    fail 'pre-exit refusal spent an attempt'
+  cmp "$dir/brief-before" "$dir/home/data/bounded/brief.md" ||
+    fail 'pre-exit refusal replaced the current brief'
+  : >"$dir/fake/composer"
+  out=$(run_control "$dir" bounded relaunch --harness claude --model repair --effort high \
+    --note 'SUPERVISOR AUDIT THEORY')
+  rc=$?
   expect_code 0 "$rc" "classified native repair must succeed"$'\n'"$out"
-  assert_grep 'BOUNDED INJECTION' "$dir/home/data/bounded/launch-brief.md"
-  assert_grep 'Focused test reports expected 2' "$dir/home/data/bounded/launch-brief.md"
+  assert_grep 'BOUNDED INJECTION' "$dir/home/data/bounded/launch-brief.md" \
+    'repair must receive configured instructions'
+  assert_grep 'Focused test reports expected 2' "$dir/home/data/bounded/launch-brief.md" \
+    'repair must receive objective evidence'
   if grep -q 'OLD WORKER THEORY' "$dir/home/data/bounded/launch-brief.md"; then
     fail 'repair inherited previous reasoning'
   fi
+  assert_grep 'SUPERVISOR AUDIT THEORY' "$dir/home/state/bounded.control-relaunch.note" \
+    'supplied note must survive in parent audit'
+  assert_no_grep 'SUPERVISOR AUDIT THEORY' "$dir/home/data/bounded/launch-brief.md" \
+    'audit note must not reach repair worker'
+  assert_no_grep 'Create branch fm/bounded now' "$dir/home/data/bounded/launch-brief.md" \
+    'repair must not repeat initial branch creation'
+  assert_grep 'Current branch or detached commit:' "$dir/home/data/bounded/launch-brief.md" \
+    'repair setup must describe the current branch'
   [ "$(cat "$dir/wt/preserved.txt")" = 'uncommitted work' ] || fail 'work was lost'
   [ "$(meta_field "$dir" bounded worktree)" = "$dir/wt" ] || fail 'worktree changed'
   jq -e '.attempt == 2 and .phase == "running"' \
     "$dir/home/data/bounded/execution.json" >/dev/null || fail 'repair not accounted'
   echo 'ok - bounded native repair refuses before stop and preserves fresh handoff/work'
 }
+
+# Focused execution-policy validation avoids unrelated timing-heavy control cases.
+if [ "${1:-}" = --bounded-only ]; then
+  test_bounded_repair_preserves_work_and_fresh_evidence
+  exit 0
+fi
 
 test_bounded_repair_preserves_work_and_fresh_evidence
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint

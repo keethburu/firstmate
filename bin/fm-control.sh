@@ -776,7 +776,9 @@ safe_checkpoint() {
 # so the note stays parent-side audit evidence.
 record_note() {
   local stamp
-  if [ -n "${EXECUTION_TICKET:-}" ]; then
+  if [ "${execution_enrolled:-0}" = 1 ]; then
+    cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" ||
+      die "could not preserve task $ID's instructions before recording the audit note"
     printf '%s\n' "$NOTE" > "$NOTE_FILE"
     return 0
   fi
@@ -816,7 +818,7 @@ do_relaunch() {
   execution_enrolled=0
   if fm_execution_record "$ID" >/dev/null; then
     execution_enrolled=1
-    NOTE='See the recorded objective execution evidence.'
+    [ "$NOTE_SET" = 1 ] || NOTE='See the recorded objective execution evidence.'
     NOTE_SET=1
   else
     execution_rc=$?
@@ -848,8 +850,8 @@ do_relaunch() {
   fi
   safe_checkpoint
   if [ "$execution_enrolled" = 1 ]; then
-    EXECUTION_TICKET=$(FM_EXECUTION_CONTROL_PARENT=1 fm_execution_cli _prepare "$ID" "$ID" \
-      "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT") || exit 1
+    FM_EXECUTION_CONTROL_PARENT=1 fm_execution_cli _check "$ID" "$ID" \
+      "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || exit 1
   fi
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
@@ -861,6 +863,10 @@ do_relaunch() {
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  if [ "$execution_enrolled" = 1 ]; then
+    EXECUTION_TICKET=$(FM_EXECUTION_CONTROL_PARENT=1 fm_execution_cli _prepare "$ID" "$ID" \
+      "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT") || exit 1
+  fi
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
