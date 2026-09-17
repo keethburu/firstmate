@@ -727,6 +727,31 @@ test_first_observation_after_merge_claims_nothing() {
   pass 'a PR first seen as merged records schema defaults and claims no coverage'
 }
 
+test_merge_retires_the_absent_lane() {
+  local home
+  home=$(new_home merged-absent-lane)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].observation.checks += [{name:"required-extra",id:2,status:"completed",conclusion:"success",started_at:"2026-09-16T07:59:00Z"}]'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'pre-merge poll failed'
+  jq -e '.records[0].observation.absent_checks == ["required-extra"]' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'the fixture did not leave an absent lane to carry across the merge'
+  bearings "$home" | jq -e '.contributions.missing_verdicts == 1 and .contributions.counts.fleet == 1' >/dev/null \
+    || fail 'an absent lane before the merge was not a missing verdict'
+  printf 'merged\n' > "$home/forge/fault"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'post-merge poll failed'
+  jq -e '.records[0].observation.state == "merged"
+    and ((.records[0].observation.absent_checks // []) | length == 0)' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "a merge kept a lane diff it can never re-read: $(cat "$home/data/delivery/contributions.json")"
+  bearings "$home" | jq -e '.contributions.missing_verdicts == 0
+    and .contributions.counts == {captain:0,fleet:0,maintainer:0,nobody:1}
+    and .contributions.proven_clear == true' >/dev/null \
+    || fail 'merged work reported a verdict gap no actor can close'
+  pass 'a merge retires the absent lane instead of freezing a verdict gap'
+}
+
 test_merged_pr_skips_unneeded_checks_and_captures_comments() {
   local home out count
   home=$(new_home merged-skips-checks)
@@ -893,6 +918,7 @@ for test_name in \
   test_closed_pr_recheck_failure_is_unavailable \
   test_new_owner_of_merged_url_observes_it_itself \
   test_first_observation_after_merge_claims_nothing \
+  test_merge_retires_the_absent_lane \
   test_merged_pr_skips_unneeded_checks_and_captures_comments \
   test_genuine_failure_near_deadline_is_unavailable \
   test_unsupported_forge_is_recorded_once_without_budget \

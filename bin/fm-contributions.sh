@@ -48,7 +48,9 @@
 # .review_decision repeat that record's own last pre-merge observation of them,
 # or, when it never observed the work before the merge, carry the schema
 # defaults [], false and "". Neither form is a reading of the merged forge
-# state, and merged work claims no check coverage and no merge authority.
+# state, and merged work claims no check coverage and no merge authority. A
+# merge also retires observation.absent_checks: that lane diff needs a check
+# read the merged branch no longer makes, so it cannot outlive the merge.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
@@ -325,8 +327,7 @@ poll() {
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
               else [] end)) as $events
           | (if $o.state == "merged" and $old.observation != null then
-              {absent_checks:($old.observation.absent_checks // []),
-               checks:($old.observation.checks // []),
+              {checks:($old.observation.checks // []),
                can_merge:($old.observation.can_merge // false),
                review_decision:($old.observation.review_decision // "")}
              else {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}
