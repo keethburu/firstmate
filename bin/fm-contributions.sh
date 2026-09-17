@@ -15,6 +15,8 @@
 # owned. Previously observed URLs remain in data/<task>/contributions.json after
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
+# Poll writes an unsupported-forge record once, without a forge read or wake,
+# and skips that URL for every owner that already has a record.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
@@ -56,7 +58,8 @@
 # arm registers the existing authenticated custom-check path. Startup and PR
 # registration call it; when filing a linked upstream issue, call arm as well.
 # jq_lib receives literal jq programs, not shell expressions.
-# shellcheck disable=SC2016
+# Dynamic sources and source-owned wake variables are verified by fm-lint.sh.
+# shellcheck disable=SC1091,SC2016,SC2034
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -182,9 +185,9 @@ forge() {
   return "$rc"
 }
 
-observe() { # canonical GitHub URL -> normalized JSON
+observe() { # canonical contribution URL -> normalized JSON; 2 means unsupported
   local url=$1 part number kind endpoint head after label
-  case "$url" in https://github.com/*) ;; *) return 1 ;; esac
+  case "$url" in https://github.com/*) ;; *) return 2 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
   forge api "$endpoint" > "$TMP/core.json" || return 1
@@ -269,23 +272,28 @@ poll() {
   get_input
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
-  # One line per distinct URL: the URL, then every owning task.
+  # One line per distinct URL: the URL, then every owning task. An unsupported
+  # forge lists only owners without a record yet.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // "")})
+    known($input[0];$saved[0]) | map(. as $k
+      | ([$saved[0][] | select(.task == $k.task) | .records[]
+          | select(.url == $k.url)] | first) as $record
+      | select(($k.url | startswith("https://github.com/")) or $record == null)
+      | . + {at:($record.checked_at // "")})
     | group_by(.url) | map({url:.[0].url,at:(map(.at) | min),tasks:(map(.task) | unique)})
     | sort_by(.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
   BUDGET_EXHAUSTED=0
   while IFS=$'\t' read -r -a row; do
     [ "${#row[@]}" -ge 2 ] || continue
-    [ "$(date +%s)" -lt "$DEADLINE" ] || break
     url=${row[0]}
     observed=0
     observe "$url" || observed=$?
     # An observation the budget cut short is unmeasured, not unavailable: keep
     # every owner's prior record so the URL is observed first next poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
-    [ "$observed" -eq 0 ] || printf 'contributions: observation unavailable for %s\n' "$url"
+    [ "$observed" -eq 0 ] || [ "$observed" -eq 2 ] \
+      || printf 'contributions: observation unavailable for %s\n' "$url"
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
     for task in "${row[@]:1}"; do
       fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
@@ -302,7 +310,12 @@ poll() {
           | $old + {checked_at:$now,error:null,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:($events | map(.token)),
-            pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
+            pending:(($old.pending // [])
+              + [$events[]
+                | select(.token as $t | ($old.seen // [] | index($t)) == null)]
+              | unique_by(.token))}' > "$TMP/row.json"
+      elif [ "$observed" -eq 2 ]; then
+        cp "$old" "$TMP/row.json"
       else
         error='forge observation unavailable or changed during read'
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
