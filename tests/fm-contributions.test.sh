@@ -608,9 +608,60 @@ test_genuine_failure_near_deadline_is_unavailable() {
   [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
     || fail "a genuine forge failure past the deadline was swallowed: $out"
   jq -e --arg now "$NOW" '.records[0].checked_at == $now
-    and .records[0].error == "forge observation unavailable or changed during read"' \
+    and .records[0].error == "forge observation unavailable or changed during read"
+    and .records[0].unmeasured == null' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a genuine forge failure left no error evidence'
   pass 'a genuine forge failure inside the budget still records the error and wakes'
+}
+
+test_unsupported_forge_is_recorded_once_without_budget() {
+  local home out pending url
+  home=$(new_home unsupported-poll)
+  url=https://gitlab.com/o/r/-/merge_requests/13
+  printf -- '- [ ] gitlab - Filed %s (repo: sample) (kind: ship)\n' "$url" \
+    >> "$home/data/backlog.md"
+  mkdir -p "$home/data/gitlab"
+  jq -n --arg url "$url" --arg head "$HEAD_A" --arg at "$NOW" '
+    {schema:"fm-contributions.v1",task:"gitlab",records:[{
+      url:$url,kind:"pr",checked_at:$at,
+      error:"forge observation unavailable or changed during read",observation:null,
+      verdict:{head:$head,source:($url + "#note_1"),actor:"maintainer",
+        summary:"prior verdict"},
+      seen:["seen"],pending:[{token:"pending"}],notified:["pending"]}]}' \
+    > "$home/data/gitlab/contributions.json"
+  cat > "$home/fakebin/gh" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FORGE_CALLS"
+exit 1
+SH
+  chmod +x "$home/fakebin/gh"
+  out=$(FORGE_CALLS="$home/forge-calls" with_home "$home" \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'first unsupported-forge poll failed'
+  [ -z "$out" ] || fail "an unsupported forge printed a wake line: $out"
+  [ ! -e "$home/forge-calls" ] || fail 'an unsupported forge consumed forge budget'
+  jq -e '.records[0] | .url == "https://gitlab.com/o/r/-/merge_requests/13"
+    and .unmeasured == "unsupported-forge" and .error == null
+    and .seen == ["seen"] and .pending == [{token:"pending"}]
+    and .notified == ["pending"] and .verdict.summary == "prior verdict"' \
+    "$home/data/gitlab/contributions.json" >/dev/null \
+    || fail 'unsupported marker changed existing contribution state'
+  pending=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending) \
+    || fail 'unsupported-forge pending projection failed'
+  printf '%s' "$pending" | jq -e 'any(.[]; . == {
+    task:"gitlab",url:"https://gitlab.com/o/r/-/merge_requests/13",
+    type:"unmeasured",reason:"unsupported-forge"})' >/dev/null \
+    || fail "pending output hid unsupported coverage: $pending"
+  bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
+    and .contributions.unmeasured == 1 and .contributions.complete == false' >/dev/null \
+    || fail 'snapshot projection hid the durable unsupported contribution'
+  cp "$home/data/gitlab/contributions.json" "$home/prior.json"
+  out=$(FORGE_CALLS="$home/forge-calls" with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'second unsupported-forge poll failed'
+  [ -z "$out" ] || fail "a known unsupported forge was re-reported: $out"
+  [ ! -e "$home/forge-calls" ] || fail 'a known unsupported forge consumed forge budget'
+  cmp -s "$home/prior.json" "$home/data/gitlab/contributions.json" \
+    || fail 'a known unsupported-forge record was rewritten on the next poll'
+  pass 'unsupported forge is durably unmeasured, visible, silent, and budget-free'
 }
 
 test_shared_url_observed_once() {
@@ -633,7 +684,9 @@ test_shared_url_observed_once() {
         || fail "a shared unavailable observation did not wake exactly once ($mode): $out"
     fi
     for task in delivery duplicate; do
-      jq -e --arg now "$NOW" --argjson error "$expected" '.records[0].checked_at == $now and .records[0].error == $error' \
+      jq -e --arg now "$NOW" --argjson error "$expected" \
+        '.records[0].checked_at == $now and .records[0].error == $error
+          and .records[0].unmeasured == null' \
         "$home/data/$task/contributions.json" >/dev/null || fail "owner $task did not receive the shared result ($mode)"
     done
   done
@@ -641,7 +694,39 @@ test_shared_url_observed_once() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once; do
+for test_name in \
+  test_actor_coverage \
+  test_stale_verdict \
+  test_unchecked_is_not_silence \
+  test_newest_check_has_no_verdict \
+  test_comment_wake \
+  test_review_wake \
+  test_inline_wake \
+  test_ready_issue_wake \
+  test_fresh_issue_requires_maintainer \
+  test_missing_lane_remains_missing \
+  test_partial_freshness_keeps_measured_rows \
+  test_malformed_record_cannot_prove_silence \
+  test_issue_timeline_and_exact_ack \
+  test_verdict_retains_judged_head \
+  test_observed_replacement_refreshes_verdict \
+  test_unobserved_head_leaves_verdict_unknown \
+  test_away_yolo_is_fleet_work \
+  test_away_yolo_cross_home_is_fleet_work \
+  test_retired_and_unsupported_coverage \
+  test_unsupported_forge_is_not_fleet_work \
+  test_held_unsupported_forge_is_not_captain_work \
+  test_shared_contribution_signal_wakes_once \
+  test_watcher_keeps_diagnostics_separate_from_contribution_wakes \
+  test_expired_child_unsupported_forge_stays_unmeasured \
+  test_watcher_surfaces_new_contribution_once \
+  test_home_summary_coverage \
+  test_unreadable_pending_is_not_empty \
+  test_budget_refusal_between_calls \
+  test_budget_bounded_call_timeout \
+  test_genuine_failure_near_deadline_is_unavailable \
+  test_unsupported_forge_is_recorded_once_without_budget \
+  test_shared_url_observed_once; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
