@@ -642,15 +642,31 @@ test_terminal_merged_failure_stays_silent_and_keeps_observation() {
   [ -z "$out" ] || fail "terminal merged failure printed a wake line: $out"
   jq -e --arg now "$NOW" --slurpfile prior "$home/prior.json" '
     .records[0].observation == $prior[0].records[0].observation
-    and .records[0].error == null and .records[0].checked_at == $now' \
+    and .records[0].error == "forge observation unavailable or changed during read"
+    and .records[0].checked_at == $now' \
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail "terminal merged failure lost the merged observation or pinned the queue: $(cat "$home/data/delivery/contributions.json")"
   [ ! -s "$home/state/.wake-queue" ] || fail 'terminal merged failure enqueued a wake'
   bearings "$home" | jq -e '
-    .contributions.known == 1 and .contributions.checked == 1
+    .contributions.known == 1 and .contributions.checked == 0
+    and .contributions.complete == false
+    and .contributions.counts == {captain:0,fleet:1,maintainer:0,nobody:0}' >/dev/null \
+    || fail 'a merged record with no successful read claimed measured coverage'
+  printf 'merged\n' > "$home/forge/fault"
+  jq -n '[{id:43,user:{login:"maintainer"},author_association:"MEMBER",
+    body:"Shipped, thanks",html_url:"https://github.com/o/r/pull/8#issuecomment-43",
+    updated_at:"2026-09-16T08:06:00Z"}]' > "$home/forge/comments.json"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed once the forge recovered'
+  printf '%s\n' "$out" | grep -F 'contribution-wake: check: contributions delivery' >/dev/null \
+    || fail "a post-merge comment after the outage never woke: $out"
+  jq -e '.records[0].error == null and .records[0].observation.state == "merged"
+    and (.records[0].pending | length == 1)' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a recovered read did not clear the error or capture the comment'
+  bearings "$home" | jq -e '.contributions.checked == 1
     and .contributions.counts == {captain:0,fleet:0,maintainer:0,nobody:1}' >/dev/null \
-    || fail 'terminal merged failure lost the nobody/merged bearings state'
-  pass 'an already-merged PR stays silent, keeps its observation, and records the attempt'
+    || fail 'a recovered merged observation did not return to measured silence'
+  pass 'a merged re-check failure stays silent, discloses the gap, and recovers on the next read'
 }
 
 test_closed_pr_recheck_failure_is_unavailable() {
@@ -690,7 +706,8 @@ test_new_owner_of_merged_url_observes_it_itself() {
     and .records[0].error == "forge observation unavailable or changed during read"' \
     "$home/data/duplicate/contributions.json" >/dev/null \
     || fail "a new owner took a sibling's merged observation: $(cat "$home/data/duplicate/contributions.json")"
-  jq -e '.records[0].error == null and .records[0].observation.state == "merged"' \
+  jq -e '.records[0].observation.state == "merged"
+    and .records[0].error == "forge observation unavailable or changed during read"' \
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail 'the merged owner lost its own observation'
   bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
@@ -750,6 +767,43 @@ test_merge_retires_the_absent_lane() {
     and .contributions.proven_clear == true' >/dev/null \
     || fail 'merged work reported a verdict gap no actor can close'
   pass 'a merge retires the absent lane instead of freezing a verdict gap'
+}
+
+test_merged_lane_history_is_not_a_current_gap() {
+  local home out
+  home=$(new_home merged-lane-history)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].observation.checks = [
+    {name:"test",id:1,status:"completed",conclusion:null,started_at:"2026-09-16T07:59:00Z"},
+    {name:"lint",id:2,status:"in_progress",conclusion:null,started_at:"2026-09-16T07:59:00Z"},
+    {name:"e2e",id:3,status:"completed",conclusion:"failure",started_at:"2026-09-16T07:59:00Z"}]'
+  bearings "$home" | jq -e '.contributions.missing_verdicts == 1
+    and .contributions.counts == {captain:0,fleet:1,maintainer:0,nobody:0}' >/dev/null \
+    || fail 'an open delivery stopped counting its own lane gaps'
+  mutate_record "$home" delivery '.records[0].observation.state="closed"'
+  bearings "$home" | jq -e '.contributions.missing_verdicts == 1' >/dev/null \
+    || fail 'a closed, unmerged contribution stopped counting its lane gaps'
+  mutate_record "$home" delivery '.records[0].observation.state="open"'
+  printf 'merged\n' > "$home/forge/fault"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'poll failed on the merge of a delivery with unresolved lanes'
+  jq -e '.records[0].observation.state == "merged"
+    and ([.records[0].observation.checks[].name] == ["test","lint","e2e"])' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "the merge discarded the pre-merge lane history: $(cat "$home/data/delivery/contributions.json")"
+  bearings "$home" | jq -e '.contributions.missing_verdicts == 0
+    and .contributions.counts == {captain:0,fleet:0,maintainer:0,nobody:1}
+    and .contributions.proven_clear == true' >/dev/null \
+    || fail 'merged lane history was reported as a verdict gap no actor can close'
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
+    || fail 'could not collect contribution input after the merge'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all) \
+    || fail 'could not project the merged delivery'
+  printf '%s' "$out" | jq -e '.rows[0] | .distinct_checks == 3 and .missing_verdicts == 0
+    and .pending_checks == 0 and .failed_checks == 0 and .actor == "nobody"' >/dev/null \
+    || fail "merged lane history became a current lane count: $out"
+  pass 'merged lane history is kept but never counted as a current lane gap'
 }
 
 test_merged_pr_skips_unneeded_checks_and_captures_comments() {
@@ -919,6 +973,7 @@ for test_name in \
   test_new_owner_of_merged_url_observes_it_itself \
   test_first_observation_after_merge_claims_nothing \
   test_merge_retires_the_absent_lane \
+  test_merged_lane_history_is_not_a_current_gap \
   test_merged_pr_skips_unneeded_checks_and_captures_comments \
   test_genuine_failure_near_deadline_is_unavailable \
   test_unsupported_forge_is_recorded_once_without_budget \

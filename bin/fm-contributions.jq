@@ -52,9 +52,12 @@ def projected($input; $saved; $now; $max_age):
             else $record.error == null and $record.observation != null end)
        and ($k.url | startswith("https://github.com/"))) as $fresh
     | (($o.checks // []) | latest_checks) as $checks
-    | [$checks[] | select(.status == "completed" and (.conclusion == null or .conclusion == ""))] as $no_verdict
-    | [$checks[] | select(.status != "completed")] as $pending
-    | [$checks[] | select(.status == "completed" and .conclusion != null
+    # A merged record's lanes are its pre-merge history; no read can resolve
+    # them, so they are not a current gap. Closed work is still re-observed.
+    | (if $o.state == "merged" then [] else $checks end) as $current
+    | [$current[] | select(.status == "completed" and (.conclusion == null or .conclusion == ""))] as $no_verdict
+    | [$current[] | select(.status != "completed")] as $pending
+    | [$current[] | select(.status == "completed" and .conclusion != null
         and .conclusion != "" and (.conclusion | IN("success","skipped","neutral") | not))] as $failed
     | (($record.verdict != null) and $observed_head != null and ($record.verdict.head != $observed_head)) as $stale
     | (if $record.verdict == null then null

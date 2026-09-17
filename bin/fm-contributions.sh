@@ -21,10 +21,12 @@
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
 # observation, verdict, seen event tokens, pending events, and notified tokens.
-# observation is one coherent forge read (a PR head is rechecked after fetching
-# checks/reviews). Checks are normalized by name, id, started_at, status and
-# conclusion; projection picks the newest attempt per distinct name. The last
-# observation's lane names also disclose a lane absent from the next head.
+# observation is one coherent forge read (an unmerged PR head is rechecked
+# after fetching checks/reviews; a merged head cannot change, so a merge
+# retires that recheck). Checks are normalized by name, id, started_at,
+# status and conclusion; projection picks the newest attempt per distinct
+# name. The last observation's lane names also disclose a lane absent from the
+# next head.
 # A verdict records the EXACT judged head, source URL, actor and summary. A
 # comment's arrival time never supplies its judged head. Record a prose verdict
 # only after its source identifies that head; otherwise leave it unbound and
@@ -41,16 +43,21 @@
 # untouched; a read killed at its own five-second bound is that URL's failure
 # and records an error, so the URL rotates behind the rest of the corpus. Only
 # a genuine forge failure or head change on unmerged work records an error. A
-# record's own merged observation is permanent: it is preserved and stays quiet
-# when a re-check fails, and every other owner of that URL still observes it
-# itself. A merge stops reading check lanes, merge permission and review
-# decision: on a merged record observation.checks, .can_merge and
-# .review_decision repeat that record's own last pre-merge observation of them,
-# or, when it never observed the work before the merge, carry the schema
-# defaults [], false and "". Neither form is a reading of the merged forge
-# state, and merged work claims no check coverage and no merge authority. A
-# merge also retires observation.absent_checks: that lane diff needs a check
-# read the merged branch no longer makes, so it cannot outlive the merge.
+# record's own merged observation is permanent: a failed re-check preserves it
+# and does not repeat the unavailable line, but still records the error, so
+# checked_at is the time of the attempt and the gap stays disclosed until a read
+# succeeds. Every other owner of that URL still observes it itself. A merge
+# stops reading check lanes, merge permission and review decision: on a merged
+# record observation.checks, .can_merge and .review_decision repeat that
+# record's own last pre-merge observation of them, or, when it never observed
+# the work before the merge, carry the schema defaults [], false and "".
+# Neither form is a reading of the merged forge
+# state, and merged work claims no check coverage and no merge authority. Those
+# lanes are history, not a current reading, so projection reports no missing,
+# pending or failed lane on merged work while still counting them on open and
+# closed work. A merge also retires observation.absent_checks: that lane diff
+# needs a check read the merged branch no longer makes, so it cannot outlive
+# the merge.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
@@ -341,14 +348,12 @@ poll() {
               | unique_by(.token))}' > "$TMP/row.json"
       elif [ "$observed" -eq 2 ]; then
         cp "$old" "$TMP/row.json"
-      elif jq -e '(.observation.state // "") == "merged"' "$old" >/dev/null 2>&1; then
-        # Only this record's own merge is permanent, and a closed contribution
-        # can reopen; the attempt is still recorded so the URL rotates behind
-        # the rest of the corpus instead of pinning the queue.
-        jq --arg now "$NOW" '.checked_at=$now | .error=null' "$old" > "$TMP/row.json"
       else
         error='forge observation unavailable or changed during read'
-        unavailable=1
+        # Only this record's own merge stays quiet about a failed re-check; a
+        # closed contribution can reopen. The attempt is recorded either way so
+        # the URL rotates instead of pinning the queue.
+        jq -e '(.observation.state // "") == "merged"' "$old" >/dev/null 2>&1 || unavailable=1
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
