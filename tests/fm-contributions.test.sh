@@ -560,8 +560,12 @@ case "$fault:$*" in
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock"
     printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
+  fail-core:'api repos/o/r/pulls/8') printf 'HTTP 500\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
+  timeout:'api repos/o/r/pulls/8') exit 124 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
+  merged:'api repos/o/r/pulls/8')
+    jq -n --arg head "$(cat "$FORGE/head")" '{state:"closed",user:{login:"author"},head:{sha:$head},draft:false,mergeable:null,merged_at:"2026-09-16T08:00:00Z"}'; exit 0 ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
 SH
@@ -595,6 +599,86 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
 
 test_budget_refusal_between_calls() { test_budget_exhaustion_keeps_prior_record exhaust; }
 test_budget_bounded_call_timeout() { test_budget_exhaustion_keeps_prior_record hang; }
+
+test_default_budget_bounded_call_timeout() {
+  local home out
+  home=$(new_home default-budget-timeout)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  cp "$home/data/delivery/contributions.json" "$home/prior.json"
+  printf 'timeout\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on default-budget timeout'
+  [ -z "$out" ] || fail "default-budget timeout printed a wake line: $out"
+  grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
+    || fail 'default-budget timeout observation never started'
+  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+    || fail "default-budget timeout rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
+  [ ! -s "$home/state/.wake-queue" ] || fail 'default-budget timeout enqueued a wake'
+  pass 'a read timeout under default budget exhausts budget, preserves the record, and stays silent'
+}
+
+test_terminal_merged_failure_stays_silent_and_keeps_record() {
+  local home out
+  home=$(new_home terminal-merged-fail)
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" delivery 8 merged mergeable
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-16T07:55:00Z"'
+  cp "$home/data/delivery/contributions.json" "$home/prior.json"
+  printf 'fail-core\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on terminal merged forge failure'
+  [ -z "$out" ] || fail "terminal merged failure printed a wake line: $out"
+  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+    || fail "terminal merged failure rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
+  [ ! -s "$home/state/.wake-queue" ] || fail 'terminal merged failure enqueued a wake'
+  bearings "$home" | jq -e '
+    .contributions.known == 1 and .contributions.checked == 1
+    and .contributions.counts == {captain:0,fleet:0,maintainer:0,nobody:1}' >/dev/null \
+    || fail 'terminal merged failure lost the nobody/merged bearings state'
+  pass 'an already-merged PR stays silent and preserves its record on forge re-check failure'
+}
+
+test_merged_pr_skips_unneeded_checks_and_captures_comments() {
+  local home out count wake_count
+  home=$(new_home merged-skips-checks)
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" delivery 8 merged mergeable
+  printf 'merged\n' > "$home/forge/fault"
+  jq -n --arg head "$HEAD_A" '[{id:42,user:{login:"maintainer"},author_association:"MEMBER",
+    body:"Thanks for the contribution!",html_url:"https://github.com/o/r/pull/8#issuecomment-42",
+    updated_at:"2026-09-16T08:05:00Z"}]' > "$home/forge/comments.json"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on merged PR with comment'
+  [ -n "$out" ] || fail 'new maintainer comment on merged PR was silent'
+  printf '%s\n' "$out" | grep -F 'contribution-wake: check: contributions delivery' >/dev/null \
+    || fail "expected contribution-wake line was missing: $out"
+  grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
+    || fail 'merged PR observation never read core PR endpoint'
+  if grep -E 'check-runs|statuses|repos/o/r$|pr view' "$home/forge/calls" >/dev/null; then
+    fail "merged PR observation made unneeded checks calls: $(cat "$home/forge/calls")"
+  fi
+  jq -e --arg now "$NOW" '
+    .records[0].checked_at == $now
+    and .records[0].error == null
+    and .records[0].observation.state == "merged"
+    and (.records[0].pending | length == 1)
+    and (.records[0].pending[0].author == "maintainer")' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "merged PR did not capture maintainer comment: $(cat "$home/data/delivery/contributions.json")"
+  [ -s "$home/state/.wake-queue" ] || fail 'merged PR comment never enqueued a wake'
+  count=$(wc -l < "$home/state/.wake-queue")
+  wake_count=$(awk 'END { print NR }' "$home/state/.wake-queue")
+  [ "$wake_count" = 1 ] || fail 'merged PR comment did not enqueue exactly one wake'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 're-poll on merged PR failed'
+  [ -z "$out" ] || fail "re-poll on merged PR re-woke: $out"
+  [ "$(wc -l < "$home/state/.wake-queue")" = "$count" ] || fail 're-poll duplicated wake in queue'
+  pass 'merged PR skips unneeded checks calls, captures post-merge comment, and wakes once'
+}
 
 test_genuine_failure_near_deadline_is_unavailable() {
   local home out
@@ -713,6 +797,9 @@ for test_name in \
   test_unreadable_pending_is_not_empty \
   test_budget_refusal_between_calls \
   test_budget_bounded_call_timeout \
+  test_default_budget_bounded_call_timeout \
+  test_terminal_merged_failure_stays_silent_and_keeps_record \
+  test_merged_pr_skips_unneeded_checks_and_captures_comments \
   test_genuine_failure_near_deadline_is_unavailable \
   test_unsupported_forge_is_recorded_once_without_budget \
   test_shared_url_observed_once; do

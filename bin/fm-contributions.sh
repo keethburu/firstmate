@@ -37,8 +37,10 @@
 # 1..25). Each gh call is bounded by the remaining budget and five seconds.
 # Oldest observations go first, so a large corpus progresses across polls.
 # Each distinct URL is observed once per poll and applied to every owner. When
-# the budget runs out mid-observation, the poll ends with that URL's records
-# untouched; only a genuine forge failure or head change records an error.
+# the budget runs out mid-observation or a read times out, the poll ends with
+# that URL's records untouched; only a genuine forge failure or head change on
+# nonterminal work records an error. A stable terminal state preserves its
+# observation and stays quiet when a re-check fails.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
@@ -180,8 +182,8 @@ forge() {
   if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$TMP/forge.err" || rc=$?
-  # A read killed at the budget's own deadline is budget exhaustion too.
-  [ "$rc" -ne 124 ] || [ "$bounded" -eq 0 ] || BUDGET_EXHAUSTED=1
+  # Any read killed by timeout is budget exhaustion too.
+  [ "$rc" -ne 124 ] || BUDGET_EXHAUSTED=1
   return "$rc"
 }
 
@@ -198,10 +200,17 @@ observe() { # canonical contribution URL -> normalized JSON; 2 means unsupported
     head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
     forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" || return 1
     forge api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" || return 1
-    forge api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" || return 1
-    forge api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" || return 1
-    forge api "repos/$part" > "$TMP/repo.json" || return 1
-    forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
+    if jq -e '.merged_at != null' "$TMP/core.json" >/dev/null 2>&1; then
+      printf '[]\n' > "$TMP/checks.json"
+      printf '[[]]\n' > "$TMP/statuses.json"
+      printf '{"permissions":{"push":false}}\n' > "$TMP/repo.json"
+      jq -n --arg head "$head" '{headRefOid:$head,reviewDecision:""}' > "$TMP/after.json"
+    else
+      forge api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" || return 1
+      forge api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" || return 1
+      forge api "repos/$part" > "$TMP/repo.json" || return 1
+      forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
+    fi
     after=$(jq -er .headRefOid "$TMP/after.json")
     [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
@@ -292,7 +301,12 @@ poll() {
     # An observation the budget cut short is unmeasured, not unavailable: keep
     # every owner's prior record so the URL is observed first next poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
-    [ "$observed" -eq 0 ] || [ "$observed" -eq 2 ] \
+    terminal=0
+    if jq -ne --arg url "$url" --slurpfile saved "$TMP/saved.json" '
+      ($saved[0] // []) | any(.[].records[]?; .url == $url and ((.observation.state // "") | IN("merged","closed")))' >/dev/null 2>&1; then
+      terminal=1
+    fi
+    [ "$observed" -eq 0 ] || [ "$observed" -eq 2 ] || [ "$terminal" -eq 1 ] \
       || printf 'contributions: observation unavailable for %s\n' "$url"
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
     for task in "${row[@]:1}"; do
@@ -316,6 +330,14 @@ poll() {
               | unique_by(.token))}' > "$TMP/row.json"
       elif [ "$observed" -eq 2 ]; then
         cp "$old" "$TMP/row.json"
+      elif [ "$terminal" -eq 1 ]; then
+        if jq -e '((.observation.state // "") | IN("merged","closed"))' "$old" >/dev/null 2>&1; then
+          cp "$old" "$TMP/row.json"
+        else
+          jq -n --slurpfile saved "$TMP/saved.json" --slurpfile old "$old" --arg url "$url" '
+            ([($saved[0] // [])[].records[]? | select(.url == $url and ((.observation.state // "") | IN("merged","closed")))] | first) as $ref
+            | if $ref != null then $old[0] + {checked_at:$ref.checked_at, observation:$ref.observation, error:null} else $old[0] end' > "$TMP/row.json"
+        fi
       else
         error='forge observation unavailable or changed during read'
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
