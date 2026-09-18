@@ -64,6 +64,10 @@
 #          nonvisual dispatch continues with plain-text decisions and reports,
 #          but Lavish use still requires a compatible build at or above its floor.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
+#          A valid config/crew-dispatch.json that names pi-budget-axi reports
+#          MISSING_MANUAL for pi-budget-axi when the CLI is not on PATH and for
+#          pi-budget-extension when pi's extensions directory
+#          (${PI_CODING_AGENT_DIR:-~/.pi/agent}/extensions) lacks pi-budget.ts.
 #          tasks-axi and quota-axi are essential bootstrap tools.
 #          A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -880,6 +884,7 @@ manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
     cursor-agent) echo "https://cursor.com/cli" ;;
+    pi-budget-axi|pi-budget-extension) echo "https://github.com/keethburu/pi-budget-axi#setup" ;;
     *) return 1 ;;
   esac
 }
@@ -1101,6 +1106,17 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# A dispatch file that names pi-budget-axi gates pi work on that spend budget.
+# The gate needs both halves: without the CLI the pi extension blocks every
+# governed call, and without the extension pi spends unchecked.
+crew_dispatch_budget_gate() {
+  local file=$1 extension
+  grep -q 'pi-budget-axi' "$file" || return 0
+  command -v pi-budget-axi >/dev/null 2>&1 || missing_tool_diagnostic pi-budget-axi
+  extension="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions/pi-budget.ts"
+  [ -e "$extension" ] || missing_tool_diagnostic pi-budget-extension
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -1181,6 +1197,7 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
     return 0
   fi
+  crew_dispatch_budget_gate "$file"
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
     jq -r '
     def profile($p):

@@ -1163,6 +1163,47 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_crew_dispatch_budget_gate() {
+  local case_dir fakebin agent_dir out gated
+  case_dir="$TMP_ROOT/dispatch-budget-gate"
+  agent_dir="$case_dir/pi-agent"
+  mkdir -p "$case_dir/home/config" "$agent_dir/extensions"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  gated='{"rules":[{"when":"spec work","use":{"harness":"pi","model":"azure-openai-responses/gpt-5.6-luna","effort":"max"},"why":"run pi-budget-axi first"}]}'
+  printf '%s\n' "$gated" > "$case_dir/home/config/crew-dispatch.json"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    PI_CODING_AGENT_DIR="$agent_dir" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "MISSING_MANUAL: pi-budget-axi (instructions: https://github.com/keethburu/pi-budget-axi#setup)"$'\n'"MISSING_MANUAL: pi-budget-extension (instructions: https://github.com/keethburu/pi-budget-axi#setup)" ] \
+    || fail "budget-gated dispatch without the gate should name both halves, got: $out"
+
+  fm_fake_exit0 "$fakebin" pi-budget-axi
+  ln -s "$case_dir/missing-target.ts" "$agent_dir/extensions/pi-budget.ts"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    PI_CODING_AGENT_DIR="$agent_dir" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "MISSING_MANUAL: pi-budget-extension (instructions: https://github.com/keethburu/pi-budget-axi#setup)" ] \
+    || fail "a dangling extension link should count as missing, got: $out"
+
+  : > "$case_dir/missing-target.ts"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    PI_CODING_AGENT_DIR="$agent_dir" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "an installed budget gate should be silent, got: $out"
+
+  printf '%s\n' '{"rules":[{"when":"spec work","use":{"harness":"pi"}}]}' > "$case_dir/home/config/crew-dispatch.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    PI_CODING_AGENT_DIR="$case_dir/absent" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "dispatch that never names the gate should not require it, got: $out"
+
+  printf '%s\n' "${gated%\}}" > "$case_dir/home/config/crew-dispatch.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    PI_CODING_AGENT_DIR="$case_dir/absent" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON" ] \
+    || fail "malformed dispatch should report only the JSON error, got: $out"
+  pass "bootstrap requires the pi-budget-axi CLI and pi extension only when dispatch names the gate"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1191,3 +1232,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_crew_dispatch_budget_gate
