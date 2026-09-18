@@ -218,11 +218,17 @@ fm_execution_transition() {
     *) fm_execution_error "classification returns control to captain"; return 1 ;;
   esac
   fm_execution_profile "$record" "$stage" "$harness" "$model" "$effort" || return 1
-  fm_execution_custody "$source" || return 1
   generation=$(fm_meta_get "$STATE/$source.meta" spawn_gen)
   jq -e --arg generation "$generation" '.generation == $generation' "$record" >/dev/null ||
     { fm_execution_error "classification belongs to an older launch"; return 1; }
-  [ "${FM_EXECUTION_CHECK_ONLY:-0}" != 1 ] || return 0
+  if [ "${FM_EXECUTION_CHECK_ONLY:-0}" = 1 ]; then
+    if fm_execution_custody "$source"; then return 0
+    else [ "$?" = 2 ] && return 0
+      return 1
+    fi
+  fi
+  fm_execution_stopped "$source" || return 1
+  fm_execution_custody "$source" establish || return 1
   fm_execution_reserve "$record" "$source" "$target" "$class"
 }
 
@@ -231,13 +237,16 @@ fm_execution_reserve() {
   generation=$(fm_meta_get "$STATE/$source.meta" spawn_gen)
   jq -e --arg generation "$generation" '.generation == $generation' "$record" >/dev/null ||
     { fm_execution_error "classification belongs to an older launch"; return 1; }
-  fm_execution_stopped "$source" || return 1
   if [ "$source" != "$target" ]; then
     dir=$(fm_execution_task_dir "$target") || return 1
     [ ! -e "$dir/execution-root" ] && [ ! -L "$dir/execution-root" ] ||
       { fm_execution_error "restart target is already enrolled"; return 1; }
     root=$(jq -r '.root' "$record")
-    printf '%s\n' "$root" >"$dir/execution-root" || return 1
+    printf '%s\n' "$root" >"$dir/execution-root" || {
+      rm -f "$dir/execution-root"
+      fm_execution_error "cannot publish lineage pointer for restart target $target"
+      return 1
+    }
   fi
   ticket="${BASHPID:-$$}.$(date +%s).$RANDOM"
   fm_execution_write "$record" --arg target "$target" --arg source "$source" \
@@ -269,8 +278,10 @@ fm_execution_worktree() {
 }
 
 fm_execution_repair_setup() {
-  local id=$1 worktree branch posture dirty
+  local id=$1 worktree branch posture bootstrap dirty
   worktree=$(fm_execution_worktree "$id") || return 1
+  bootstrap=$(fm_ship_setup_bootstrap "$(fm_meta_get "$STATE/$id.meta" mode)") ||
+    { fm_execution_error "task $id has no valid delivery mode for its continuation setup"; return 1; }
   if branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD); then
     posture='Do not create a new branch or assume the checkout is clean.'
   else
@@ -290,6 +301,7 @@ fm_execution_repair_setup() {
     'Preserve inherited commits and uncommitted work until independently assessed.' \
     'Verify pwd -P and git rev-parse --show-toplevel both identify this task worktree.' \
     'If they identify another checkout or the primary checkout, stop and report the mismatch.'
+  [ -z "$bootstrap" ] || printf '%s\n' "$bootstrap"
   if [ -n "$dirty" ]; then
     printf '\nCurrent git status --porcelain:\n%s\n' "$dirty"
   else
@@ -321,7 +333,8 @@ fm_execution_handoff() {
   if [ "$(jq -r '.previous // empty' "$record")" = "$id" ] &&
     printf '%s\n' "$document" | fm_brief_heading_present - '# Setup'; then
     setup=$(fm_execution_repair_setup "$id") || return 1
-    printf '%s\n' "$document" | fm_brief_heading_replace - '# Setup' "$setup" || return 1
+    printf '%s\n' "$document" | fm_brief_heading_replace - '# Setup' "$setup" ||
+      { fm_execution_error "cannot render the continuation setup for $id"; return 1; }
   else
     printf '%s\n' "$document"
   fi
@@ -354,20 +367,14 @@ fm_execution_field() {
   fm_nm_strip_quotes "$value"
 }
 
-fm_execution_custody_unbound() {
-  local output=$1 count
+fm_execution_custody_no_run() {
+  local output=$1 branch=$2 current count
+  current=$(fm_execution_field "$output" current_branch) || current=
   count=$(fm_execution_field "$output" runs_on_current_branch) || count=
-  [ "$count" = 0 ] || return 2
+  [ "$current" = "$branch" ] && [ "$count" = 0 ] || return 2
   if printf '%s\n' "$output" | grep -Eq '^(run|error|branch_sync):'; then
     fm_execution_error "contradictory no-mistakes no-run response"; return 1
   fi
-}
-
-fm_execution_custody_no_run() {
-  local output=$1 branch=$2 current
-  current=$(fm_execution_field "$output" current_branch) || current=
-  [ "$current" = "$branch" ] || return 2
-  fm_execution_custody_unbound "$output"
 }
 
 fm_execution_custody_binding() {
@@ -413,35 +420,35 @@ fm_execution_custody_terminal() {
   esac
 }
 
-# A worker that died before `git checkout -b fm/<id>` left no branch for
-# no-mistakes to own. That is provable from the absent task branch plus a
-# native report of no run at all; every other detached posture refuses.
+# A worker that died before `git checkout -b fm/<id>` left a detached HEAD, and
+# no-mistakes attributes no run to one. Give the task the branch the scaffold
+# asked the first worker for, which names the current commit and moves nothing,
+# so custody is then proven against that branch like any other continuation.
+# Returns 2 while the caller is only checking: establishing the branch belongs
+# after the source worker is proven stopped.
 fm_execution_custody_prebranch() {
-  local id=$1 wt=$2 output
+  local id=$1 wt=$2 establish=$3
   if git -C "$wt" rev-parse --verify --quiet "refs/heads/fm/$id" >/dev/null; then
     fm_execution_error "task branch fm/$id exists while HEAD is detached; custody is ambiguous"
     return 1
   fi
-  output=$(fm_nm_run_bounded "$wt" 10 axi status) ||
-    { fm_execution_error "no-mistakes custody unavailable; leave work unchanged"; return 1; }
-  if fm_execution_custody_unbound "$output"; then return 0
-  else
-    [ "$?" != 2 ] ||
-      fm_execution_error "no-mistakes does not report an unused checkout; cannot prove custody"
-    return 1
-  fi
+  [ "$establish" = establish ] || return 2
+  git -C "$wt" checkout -b "fm/$id" >/dev/null 2>&1 ||
+    { fm_execution_error "cannot establish task branch fm/$id in $wt"; return 1; }
 }
 
 fm_execution_custody() {
-  local id=$1 wt branch output
+  local id=$1 establish=${2:-} wt branch output
   case "$(fm_meta_get "$STATE/$id.meta" mode)" in
     no-mistakes) ;;
     local-only|direct-PR) return 0 ;;
     *) fm_execution_error "missing or invalid delivery mode; cannot establish custody"; return 1 ;;
   esac
   wt=$(fm_execution_worktree "$id") || return 1
-  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD) ||
-    { fm_execution_custody_prebranch "$id" "$wt"; return; }
+  if ! branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD); then
+    fm_execution_custody_prebranch "$id" "$wt" "$establish" || return $?
+    branch="fm/$id"
+  fi
   output=$(fm_nm_run_bounded "$wt" 10 axi status) ||
     { fm_execution_error "no-mistakes custody unavailable; leave work unchanged"; return 1; }
   if fm_execution_custody_no_run "$output" "$branch"; then return 0

@@ -74,6 +74,23 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
   esac
 }
 
+# The delivery mode's Setup bootstrap step, owned here beside Rule 1 and the
+# Definition of done so a continuation brief re-emits the same instruction.
+# Prints nothing for modes that need no bootstrap.
+fm_ship_setup_bootstrap() {  # <no-mistakes|direct-PR|local-only>
+  case "$1" in
+    direct-PR|local-only) ;;
+    no-mistakes)
+      # shellcheck disable=SC2016 # Literal Markdown backticks, not a shell expansion.
+      printf '%s\n' 'Run `no-mistakes doctor`; if it reports the repo is not initialized here, run `no-mistakes init`.'
+      ;;
+    *)
+      echo "error: fm_ship_setup_bootstrap: unknown delivery mode '$1'" >&2
+      return 1
+      ;;
+  esac
+}
+
 # Return 0 when a Task subsection still consists only of its scaffold
 # placeholder. A missing file and legacy briefs carry no such placeholders.
 fm_brief_task_placeholders_present() {  # <file>

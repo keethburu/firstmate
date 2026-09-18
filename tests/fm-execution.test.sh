@@ -70,6 +70,7 @@ test_capacity_and_concurrency() {
 test_custody() {
   local branch ticket
   setup custody
+  printf '\n# Setup\nORIGINAL SCAFFOLD SETUP\n' >>"$TASK_HOME/data/initial/brief.md"
   seed_attempt
   sed 's/mode=local-only/mode=no-mistakes/' "$TASK_HOME/state/initial.meta" >"$CASE_DIR/meta"
   cp "$CASE_DIR/meta" "$TASK_HOME/state/initial.meta"
@@ -91,7 +92,12 @@ test_custody() {
     'branch_sync:' '  local:' "    branch: \"$branch\"" \
     '  state: "user_owned"' '  safety: "user_owned"' >"$FM_NM_OUTPUT"
   execution _consume initial "$ticket" codex test-repair high
+  execution _handoff initial >"$CASE_DIR/handoff"
   unset FM_NM_OUTPUT
+  assert_grep 'no-mistakes doctor' "$CASE_DIR/handoff" \
+    'salvageable no-mistakes continuation must keep its bootstrap step'
+  assert_no_grep 'ORIGINAL SCAFFOLD SETUP' "$CASE_DIR/handoff" \
+    'continuation must replace the scaffold setup'
   echo 'ok - unknown and active custody fail closed, including after reservation'
 }
 
@@ -105,40 +111,94 @@ SH
   export FM_NM_OUTPUT="$CASE_DIR/nm-output"
 }
 
+# Reproduces the installed no-mistakes 1.72 `axi status` answer when the caller
+# has no run of its own: current_branch plus runs_on_current_branch only where a
+# branch is known, and current_branch: unknown on a detached HEAD.
+fake_no_mistakes_native() {
+  cat >"$FAKEBIN/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -uo pipefail
+branch=$(git symbolic-ref --quiet --short HEAD) || branch=
+if [ -n "$branch" ]; then
+  printf 'current_branch: %s\nruns_on_current_branch: 0\n' "$branch"
+  printf 'runs: 0 runs yet in this repository\nhelp[1]:\n'
+  printf '  Run no-mistakes axi run --intent "the user goal" --yes to validate the current branch\n'
+else
+  printf 'current_branch: unknown\n'
+  printf 'runs: 0 runs yet in this repository\nhelp[1]:\n'
+  printf '  This worktree has no current branch (detached HEAD), so no run can be attributed to it\n'
+fi
+SH
+  chmod +x "$FAKEBIN/no-mistakes"
+}
+
 test_prebranch_capacity_recovery() {
-  local ticket
+  local base ticket
   setup prebranch
   printf '\n# Setup\nORIGINAL SCAFFOLD SETUP\n' >>"$TASK_HOME/data/initial/brief.md"
   seed_attempt
   sed 's/mode=local-only/mode=no-mistakes/' "$TASK_HOME/state/initial.meta" >"$CASE_DIR/meta"
   cp "$CASE_DIR/meta" "$TASK_HOME/state/initial.meta"
-  fake_no_mistakes
+  fake_no_mistakes_native
   printf 'uncommitted work\n' >"$WORKTREE/preserved.txt"
   git -C "$WORKTREE" checkout --detach --quiet
+  base=$(git -C "$WORKTREE" rev-parse HEAD)
   execution classify initial capacity --evidence-file "$CASE_DIR/evidence" --retry-after 0
-  printf 'runs_on_current_branch: 0\n' >"$FM_NM_OUTPUT"
   git -C "$WORKTREE" branch fm/initial HEAD
   if execution _prepare initial initial codex test-initial max; then
     fail 'detached checkout with an existing task branch was accepted'
   fi
-  git -C "$WORKTREE" branch -D fm/initial >/dev/null
-  printf 'unknown response\n' >"$FM_NM_OUTPUT"
-  if execution _prepare initial initial codex test-initial max; then
-    fail 'unproven pre-branch custody was accepted'
+  if git -C "$WORKTREE" symbolic-ref --quiet HEAD >/dev/null; then
+    fail 'ambiguous refusal moved the preserved checkout'
   fi
-  printf 'runs_on_current_branch: 0\n' >"$FM_NM_OUTPUT"
+  git -C "$WORKTREE" branch -D fm/initial >/dev/null
+  execution _check initial initial codex test-initial max
+  if git -C "$WORKTREE" symbolic-ref --quiet HEAD >/dev/null; then
+    fail 'the read-only continuation check changed the live worktree'
+  fi
   ticket=$(execution _prepare initial initial codex test-initial max)
+  [ "$(git -C "$WORKTREE" symbolic-ref --short HEAD)" = fm/initial ] ||
+    fail 'recovery did not establish the task branch'
+  [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$base" ] || fail 'recovery moved the checkout'
+  [ "$(cat "$WORKTREE/preserved.txt")" = 'uncommitted work' ] || fail 'preserved work was lost'
+  fake_no_mistakes
+  printf '%s\n' 'run:' '  branch: "fm/initial"' '  status: "running"' \
+    'branch_sync:' '  local:' '    branch: "fm/initial"' \
+    '  state: "pipeline_owned"' '  safety: "pipeline_owned"' >"$FM_NM_OUTPUT"
+  if execution _consume initial "$ticket" codex test-initial max; then
+    fail 'active ownership of the established branch was accepted'
+  fi
+  fake_no_mistakes_native
   execution _consume initial "$ticket" codex test-initial max
   execution _handoff initial >"$CASE_DIR/handoff"
   unset FM_NM_OUTPUT
   assert_no_grep 'ORIGINAL SCAFFOLD SETUP' "$CASE_DIR/handoff" \
     'continuation must replace the scaffold setup'
+  assert_grep 'Do not create a new branch' "$CASE_DIR/handoff" \
+    'continuation on the established branch must not ask for another one'
+  assert_grep 'no-mistakes doctor' "$CASE_DIR/handoff" \
+    'no-mistakes continuation must keep its bootstrap step'
+  echo 'ok - detached recovery establishes the task branch, refuses ambiguity and active runs'
+}
+
+test_local_mode_prebranch_setup() {
+  local ticket
+  setup local-prebranch
+  printf '\n# Setup\nORIGINAL SCAFFOLD SETUP\n' >>"$TASK_HOME/data/initial/brief.md"
+  seed_attempt
+  git -C "$WORKTREE" checkout --detach --quiet
+  execution classify initial salvageable --evidence-file "$CASE_DIR/evidence"
+  ticket=$(execution _prepare initial initial codex test-repair high)
+  execution _consume initial "$ticket" codex test-repair high
+  if git -C "$WORKTREE" symbolic-ref --quiet HEAD >/dev/null; then
+    fail 'a mode without pipeline custody had its branch created for it'
+  fi
+  execution _handoff initial >"$CASE_DIR/handoff"
   assert_grep 'git checkout -b fm/initial' "$CASE_DIR/handoff" \
-    'pre-branch continuation must let the worker create its delivery branch'
-  assert_no_grep 'Do not create a new branch' "$CASE_DIR/handoff" \
-    'pre-branch continuation must not forbid the branch it still needs'
-  [ "$(cat "$WORKTREE/preserved.txt")" = 'uncommitted work' ] || fail 'preserved work was lost'
-  echo 'ok - pre-branch recovery proves custody, refuses ambiguity and asks for the branch'
+    'a continuation without a branch must be told to create its delivery branch'
+  assert_no_grep 'no-mistakes doctor' "$CASE_DIR/handoff" \
+    'local-only continuation must not carry the pipeline bootstrap step'
+  echo 'ok - branchless local-only continuation asks for the branch without pipeline bootstrap'
 }
 
 test_handoff_requires_original_requirements() {
@@ -282,6 +342,7 @@ test_native_enrollment
 test_capacity_and_concurrency
 test_custody
 test_prebranch_capacity_recovery
+test_local_mode_prebranch_setup
 test_handoff_requires_original_requirements
 test_native_structural_restart
 test_immutable_policy_and_safe_snapshots

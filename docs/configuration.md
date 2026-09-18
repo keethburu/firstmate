@@ -478,6 +478,7 @@ The lifecycle allows one initial implementation attempt, one repair attempt, and
 A recorded generation-bound classification and objective evidence are required before continuation.
 Same-tree repair uses a fresh session with original requirements and evidence, while a structural restart preserves the failed worktree and starts a new task at the captured original base commit.
 The native launch paths refuse active or unproven no-mistakes custody, incorrect profiles, stale classifications, exhausted attempts, and premature capacity recovery.
+A task whose worker stopped before creating `fm/<id>` gets that branch at its current commit once the worker is proven stopped, because no-mistakes attributes no run to a detached HEAD; a detached checkout beside an existing `fm/<id>` is ambiguous and refuses.
 Failure classification remains supervisor judgment; the software enforces the recorded decision and does not claim to diagnose architectural errors.
 
 Continuation is checked before stopping the old agent, and its allocation is reserved only after a successful stop and a second locked check.
