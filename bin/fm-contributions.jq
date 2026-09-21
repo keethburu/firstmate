@@ -47,18 +47,16 @@ def projected($input; $saved; $now; $max_age):
     | ($record.observation // {}) as $o
     | (if $record.error == null and $record.observation != null and ($o.head | sha) then $o.head else null end) as $observed_head
     | (($record.checked_at // "") | try fromdateiso8601 catch null) as $checked
-    | ($checked != null and ($now - $checked) >= 0 and ($now - $checked) <= $max_age
+    # A merged or closed observation is final; poll never re-reads it, so it never expires.
+    | ($record.error == null and ($o.state | IN("merged","closed"))) as $final
+    | (($final or ($checked != null and ($now - $checked) >= 0 and ($now - $checked) <= $max_age))
        and (if $record.kind == "pr" then $observed_head != null
             else $record.error == null and $record.observation != null end)
        and ($k.url | startswith("https://github.com/"))) as $fresh
-    # A merged record's lanes are its pre-merge history; no read can resolve
-    # them, so the row reports no current lane at all. Closed work is still
-    # re-observed and keeps reporting its lanes.
-    | (if $o.state == "merged" then []
-       else (($o.checks // []) | latest_checks) end) as $current
-    | [$current[] | select(.status == "completed" and (.conclusion == null or .conclusion == ""))] as $no_verdict
-    | [$current[] | select(.status != "completed")] as $pending
-    | [$current[] | select(.status == "completed" and .conclusion != null
+    | (($o.checks // []) | latest_checks) as $checks
+    | [$checks[] | select(.status == "completed" and (.conclusion == null or .conclusion == ""))] as $no_verdict
+    | [$checks[] | select(.status != "completed")] as $pending
+    | [$checks[] | select(.status == "completed" and .conclusion != null
         and .conclusion != "" and (.conclusion | IN("success","skipped","neutral") | not))] as $failed
     | (($record.verdict != null) and $observed_head != null and ($record.verdict.head != $observed_head)) as $stale
     | (if $record.verdict == null then null
@@ -83,20 +81,20 @@ def projected($input; $saved; $now; $max_age):
        elif ($failed | length) > 0 then {actor:"fleet",reason:"checks failed"}
        elif ($no_verdict | length) > 0 or (($o.absent_checks // []) | length) > 0 then
          {actor:"fleet",reason:"check lane has no verdict"}
-       elif ($current | length) == 0 then {actor:"fleet",reason:"no reported checks; readiness unconfirmed"}
+       elif ($checks | length) == 0 then {actor:"fleet",reason:"no reported checks; readiness unconfirmed"}
        elif ($pending | length) > 0 then {actor:"fleet",reason:"checks still running"}
        elif $o.review_decision == "CHANGES_REQUESTED" then {actor:"fleet",reason:"forge requests changes"}
        elif $verdict != null and $verdict.actor == "fleet" then {actor:"fleet",reason:$verdict.summary}
        elif $verdict != null and $verdict.actor == "captain" then
          {actor:"fleet",reason:"record the unresolved arbitration as a captain hold"}
        elif $o.review_decision == "REVIEW_REQUIRED" then {actor:"maintainer",reason:"review required"}
-       elif $o.can_merge == true and ($merge_authority == "yolo" or $merge_authority == "away-grant") then
+       elif $o.can_merge == true and $merge_authority == "away" then
          {actor:"fleet",reason:"checks green; merge is authorized by delivery posture"}
        elif $o.can_merge == true then {actor:"captain",reason:"checks green; merge approval needed"}
        else {actor:"maintainer",reason:"delivery awaits the maintainer"} end) as $action
     | $k + {kind:($record.kind // (if ($k.url | contains("/issues/")) then "issue" else "pr" end)),
-         checked_at:$record.checked_at,checked:$fresh,head:($observed_head // $recorded_head // $o.head),verdict:$verdict,reviews:$reviews,
-         distinct_checks:($current | length),missing_verdicts:(($no_verdict | length) + (($o.absent_checks // []) | length)),
+         checked_at:$record.checked_at,checked:$fresh,final:$final,head:($observed_head // $recorded_head // $o.head),verdict:$verdict,reviews:$reviews,
+         distinct_checks:($checks | length),missing_verdicts:(($no_verdict | length) + (($o.absent_checks // []) | length)),
          pending_checks:($pending | length),failed_checks:($failed | length),
          stale_verdicts:((if $stale then 1 else 0 end) + ([$reviews[] | select(.freshness == "STALE")] | length)),
          signals:($record.pending // [])} + $action]
@@ -117,6 +115,6 @@ def summary($rows; $errors):
    stale_verdicts:([$rows[].stale_verdicts] | add // 0),
    missing_verdicts:([$rows[].missing_verdicts] | add // 0),
    unreadable_records:$errors,
-   valid_until:([$rows[].checked_at | try (fromdateiso8601) catch 0] | min // 0),
+   valid_until:([$rows[] | select(.final | not) | .checked_at | try (fromdateiso8601) catch 0] | min // 0),
    captain:[$rows[] | select(.actor == "captain") | {task,url,kind,head,reason:(.reason[:240]),hold,
      verdict_freshness:.verdict.freshness,verdict_head:.verdict.head,verdict_source:.verdict.source,checked_at}]};

@@ -21,12 +21,10 @@
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
 # observation, verdict, seen event tokens, pending events, and notified tokens.
-# observation is one coherent forge read (an unmerged PR head is rechecked
-# after fetching checks/reviews; a merged head cannot change, so a merge
-# retires that recheck). Checks are normalized by name, id, started_at,
-# status and conclusion; projection picks the newest attempt per distinct
-# name. The last observation's lane names also disclose a lane absent from the
-# next head.
+# observation is one coherent forge read (a PR head is rechecked after fetching
+# checks/reviews). Checks are normalized by name, id, started_at, status and
+# conclusion; projection picks the newest attempt per distinct name. The last
+# observation's lane names also disclose a lane absent from the next head.
 # A verdict records the EXACT judged head, source URL, actor and summary. A
 # comment's arrival time never supplies its judged head. Record a prose verdict
 # only after its source identifies that head; otherwise leave it unbound and
@@ -38,29 +36,16 @@
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
 # 1..25). Each gh call is bounded by the remaining budget and five seconds.
 # Oldest observations go first, so a large corpus progresses across polls.
-# Each distinct URL is observed once per poll and applied to every owner. When
+# Each distinct URL is observed once per poll and applied to every owner. A
+# final observation applies to every owner without another forge read. When
 # the budget runs out mid-observation, the poll ends with that URL's records
-# untouched; a read killed at its own five-second bound is that URL's failure
-# and records an error, so the URL rotates behind the rest of the corpus. Only
-# a genuine forge failure or head change on unmerged work records an error. A
-# record's own merged observation is permanent: a failed re-check preserves it
-# and does not repeat the unavailable line, but still records the error, so
-# checked_at is the time of the attempt and the gap stays disclosed until a read
-# succeeds. That quiet is per record: any other owner of the same URL whose own
-# record is not merged still reports the unavailable line for it. A merge
-# stops reading check lanes, merge permission and review decision: on a merged
-# record observation.checks, .can_merge and .review_decision repeat that
-# record's own last pre-merge observation of them, or, when it never observed
-# the work before the merge, carry the schema defaults [], false and "".
-# Neither form is a reading of the merged forge state, and merged work claims
-# no check coverage and no merge authority. Those lanes are history, not a
-# current reading, so projection reports no current lane on merged work at all:
-# no lane count, and no missing, pending or failed lane, while open and closed
-# work still reports every one of them. A merge also retires
-# observation.absent_checks: that lane diff needs a check read the merged
-# branch no longer makes, so it cannot outlive the merge.
+# untouched; only a genuine forge failure or head change records an error.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
+# A URL whose last good observation is merged or closed is final: it is
+# never re-read, stays fresh, and a stale error beside it is cleared once.
+# A genuine failure prints its unavailable line only when it starts an episode
+# (no prior owner has an error); a successful read ends the episode.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -78,8 +63,7 @@
 # arm registers the existing authenticated custom-check path. Startup and PR
 # registration call it; when filing a linked upstream issue, call arm as well.
 # jq_lib receives literal jq programs, not shell expressions.
-# Dynamic sources and source-owned wake variables are verified by fm-lint.sh.
-# shellcheck disable=SC1091,SC2016,SC2034
+# shellcheck disable=SC2016
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -152,7 +136,8 @@ project() {
     --arg all "${2:-}" '
     projected($input[0];$saved[0];$now;$max_age) as $rows
     | summary($rows;($errors + (if $input[0].backlog.present == true then 0 else 1 end)))
-    | .valid_until += $max_age
+    # Final rows never expire; a home holding only final rows is valid from now.
+    | .valid_until = (if ($rows | length) > 0 and all($rows[]; .final) then $now else .valid_until end) + $max_age
     | .captain_omitted = ([0, (.captain | length) - 20] | max)
     | .captain |= .[:20]
     | . + (if $all == "--all" then {rows:$rows} else {} end)'
@@ -200,8 +185,7 @@ forge() {
   if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$TMP/forge.err" || rc=$?
-  # A read killed at the budget's own deadline is budget exhaustion too; one
-  # killed at the per-call bound is this URL's failure and leaves budget.
+  # A read killed at the budget's own deadline is budget exhaustion too.
   [ "$rc" -ne 124 ] || [ "$bounded" -eq 0 ] || BUDGET_EXHAUSTED=1
   return "$rc"
 }
@@ -219,17 +203,10 @@ observe() { # canonical contribution URL -> normalized JSON; 2 means unsupported
     head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
     forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" || return 1
     forge api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" || return 1
-    if jq -e '.merged_at != null' "$TMP/core.json" >/dev/null 2>&1; then
-      printf '[]\n' > "$TMP/checks.json"
-      printf '[[]]\n' > "$TMP/statuses.json"
-      printf '{"permissions":{"push":false}}\n' > "$TMP/repo.json"
-      jq -n --arg head "$head" '{headRefOid:$head,reviewDecision:""}' > "$TMP/after.json"
-    else
-      forge api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" || return 1
-      forge api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" || return 1
-      forge api "repos/$part" > "$TMP/repo.json" || return 1
-      forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
-    fi
+    forge api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" || return 1
+    forge api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" || return 1
+    forge api "repos/$part" > "$TMP/repo.json" || return 1
+    forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
     after=$(jq -er .headRefOid "$TMP/after.json")
     [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
@@ -293,8 +270,30 @@ publish_pending() { # task canonical-url record-file
   done < <(jq -r '. as $r | .pending[] | .token | select(. as $t | ($r.notified // [] | index($t)) == null)' "$record")
 }
 
+settle_final() { # canonical-url task... : copy the URL's final observation to every owner
+  local url=$1 task
+  shift
+  jq -n --slurpfile saved "$TMP/saved.json" --arg url "$url" '
+    [$saved[0][] | .records[] | select(.url == $url
+      and (.observation.state | IN("merged","closed")))] as $final
+    | ([$final[] | select(.error == null)] | first) // ($final | first)' > "$TMP/final.json"
+  for task in "$@"; do
+    fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
+    jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" '
+      [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
+    if jq -e '. == null' "$TMP/old.json" >/dev/null; then
+      jq -n --slurpfile final "$TMP/final.json" '
+        $final[0] + {error:null,pending:[],notified:[]}' > "$TMP/row.json"
+      write_record "$task" "$TMP/row.json"
+    elif jq -e '.error != null' "$TMP/old.json" >/dev/null; then
+      jq '.error = null' "$TMP/old.json" > "$TMP/row.json"
+      write_record "$task" "$TMP/row.json"
+    fi
+  done
+}
+
 poll() {
-  local task url old kind error observed unavailable
+  local task url old kind error observed
   local -a row
   acquire
   get_input
@@ -314,14 +313,28 @@ poll() {
   BUDGET_EXHAUSTED=0
   while IFS=$'\t' read -r -a row; do
     [ "${#row[@]}" -ge 2 ] || continue
+    [ "$(date +%s)" -lt "$DEADLINE" ] || break
     url=${row[0]}
+    # A contribution with a final observation is not re-read for any owner.
+    if jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
+      'any($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
+        . != null and (.observation.state | IN("merged","closed")))' "${row[@]:1}" >/dev/null; then
+      settle_final "$url" "${row[@]:1}"
+      continue
+    fi
     observed=0
     observe "$url" || observed=$?
     # An observation the budget cut short is unmeasured, not unavailable: keep
     # every owner's prior record so the URL is observed first next poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
+    # Wake once per failure episode: only when no owner has a prior error.
+    if [ "$observed" -ne 0 ] && [ "$observed" -ne 2 ] \
+      && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
+      'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
+        .error == null)' "${row[@]:1}" >/dev/null; then
+      printf 'contributions: observation unavailable for %s\n' "$url"
+    fi
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
-    unavailable=0
     for task in "${row[@]:1}"; do
       fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
       old="$TMP/old.json"
@@ -334,34 +347,19 @@ poll() {
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
               else [] end)) as $events
-          | (if $o.state == "merged" and $old.observation != null then
-              {checks:($old.observation.checks // []),
-               can_merge:($old.observation.can_merge // false),
-               review_decision:($old.observation.review_decision // "")}
-             else {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}
-             end) as $carried
           | $old + {checked_at:$now,error:null,
-            observation:($o + $carried),
+            observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:($events | map(.token)),
-            pending:(($old.pending // [])
-              + [$events[]
-                | select(.token as $t | ($old.seen // [] | index($t)) == null)]
-              | unique_by(.token))}' > "$TMP/row.json"
+            pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
       elif [ "$observed" -eq 2 ]; then
         cp "$old" "$TMP/row.json"
       else
         error='forge observation unavailable or changed during read'
-        # Only this record's own merge stays quiet about a failed re-check; a
-        # closed contribution can reopen. The attempt is recorded either way so
-        # the URL rotates instead of pinning the queue.
-        jq -e '(.observation.state // "") == "merged"' "$old" >/dev/null 2>&1 || unavailable=1
         jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"
     done
-    [ "$unavailable" -eq 0 ] \
-      || printf 'contributions: observation unavailable for %s\n' "$url"
   done < "$TMP/known.tsv"
 }
 
